@@ -74,6 +74,8 @@ typedef __pthread_t pthread_t;
 __BEGIN_DECLS
 int	raise(int);
 
+int	sigpexit(int);
+
 #if __POSIX_VISIBLE || __XSI_VISIBLE
 int	kill(__pid_t, int);
 int	pthread_kill(__pthread_t, int);

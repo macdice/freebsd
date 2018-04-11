@@ -235,6 +235,7 @@ enum {
 	INTERPOS_map_stacks_exec,
 	INTERPOS_fdatasync,
 	INTERPOS_clock_nanosleep,
+	INTERPOS_sigpexit,
 	INTERPOS_MAX
 };
 
@@ -378,6 +379,7 @@ int		__sys_sigtimedwait(const __sigset_t *, struct __siginfo *,
 		    const struct timespec *);
 int		__sys_sigwait(const __sigset_t *, int *);
 int		__sys_sigwaitinfo(const __sigset_t *, struct __siginfo *);
+int		__sys_sigpexit(int);
 int		__sys_statfs(const char *, struct statfs *);
 int		__sys_swapcontext(struct __ucontext *,
 		    const struct __ucontext *);
@@ -397,6 +399,7 @@ int		__libc_sigprocmask(int, const __sigset_t *, __sigset_t *)
 int		__libc_sigsuspend(const __sigset_t *) __hidden;
 int		__libc_sigwait(const __sigset_t * __restrict,
 		    int * restrict sig);
+int		__libc_sigpexit(int);
 int		__libc_system(const char *);
 int		__libc_tcdrain(int);
 int		__fcntl_compat(int fd, int cmd, ...);

@@ -3623,6 +3623,26 @@ nosys(struct thread *td, struct nosys_args *args)
 	return (ENOSYS);
 }
 
+int
+sys_sigpexit(struct thread *td, struct sigpexit_args *args)
+{
+	return (kern_sigpexit(td, args->signum));
+}
+
+int
+kern_sigpexit(struct thread *td, int signum)
+{
+	struct proc *p;
+
+	p = td->td_proc;
+
+	PROC_LOCK(p);
+	p->p_sigpexit = signum;
+	PROC_UNLOCK(p);
+
+	return (0);
+}
+
 /*
  * Send a SIGIO or SIGURG signal to a process or process group using stored
  * credentials rather than those of the current process.

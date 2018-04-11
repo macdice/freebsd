@@ -481,6 +481,11 @@ exit1(struct thread *td, int rval, int signo)
 				pksignal(q->p_reaper, SIGCHLD, ksi1);
 				PROC_UNLOCK(q->p_reaper);
 			}
+			else if (q->p_sigpexit != 0)
+			{
+				/* The child asked to receive a signal when we exit. */
+				kern_psignal(q, q->p_sigpexit);
+			}
 		} else {
 			/*
 			 * Traced processes are killed since their existence

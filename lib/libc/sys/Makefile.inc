@@ -80,6 +80,7 @@ INTERPOSED = \
 	sigtimedwait \
 	sigwait \
 	sigwaitinfo \
+	sigpexit \
 	swapcontext \
 	wait4 \
 	wait6 \
@@ -317,6 +318,7 @@ MAN+=	sctp_generic_recvmsg.2 \
 	sigsuspend.2 \
 	sigwait.2 \
 	sigwaitinfo.2 \
+	sigpexit.2 \
 	socket.2 \
 	socketpair.2 \
 	stat.2 \
