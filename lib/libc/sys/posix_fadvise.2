@@ -87,6 +87,11 @@ then not reused.
 The system may decrease the in-memory priority of data once it has been
 read or written.
 Future access to this data may require a read operation.
+.It Dv POSIX_FADV_CLEAN
+Tells the system that the next write is known to be clean data, and doesn't
+necessarily need to be written back to disk.  This may be useful for
+moving data between the levels of a multi-level caching scheme.  Warning,
+this is an experimental extension!
 .El
 .Sh RETURN VALUES
 If successful,
@@ -137,3 +142,6 @@ The
 .Fn posix_fadvise
 system call first appeared in
 .Fx 9.1 .
+The
+Dv POSIX_FADV_CLEAN
+advice never appeared in any sane release.

@@ -311,6 +311,7 @@ struct __oflock {
 #define	POSIX_FADV_WILLNEED	3	/* will need these pages */
 #define	POSIX_FADV_DONTNEED	4	/* dont need these pages */
 #define	POSIX_FADV_NOREUSE	5	/* access data only once */
+#define	POSIX_FADV_CLEAN	6	/* will write data that is not dirty */
 #endif
 
 #ifndef _KERNEL

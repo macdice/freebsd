@@ -4496,6 +4496,7 @@ kern_posix_fadvise(struct thread *td, int fd, off_t offset, off_t len,
 	case POSIX_FADV_SEQUENTIAL:
 	case POSIX_FADV_RANDOM:
 	case POSIX_FADV_NOREUSE:
+	case POSIX_FADV_CLEAN:
 		new = malloc(sizeof(*fa), M_FADVISE, M_WAITOK);
 		break;
 	case POSIX_FADV_NORMAL:
@@ -4533,6 +4534,7 @@ kern_posix_fadvise(struct thread *td, int fd, off_t offset, off_t len,
 	case POSIX_FADV_SEQUENTIAL:
 	case POSIX_FADV_RANDOM:
 	case POSIX_FADV_NOREUSE:
+	case POSIX_FADV_CLEAN:
 		/*
 		 * Try to merge any existing non-standard region with
 		 * this new region if possible, otherwise create a new

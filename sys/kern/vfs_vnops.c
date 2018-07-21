@@ -757,6 +757,10 @@ get_advice(struct file *fp, struct uio *uio)
 	    uio->uio_offset >= fp->f_advice->fa_start &&
 	    uio->uio_offset + uio->uio_resid <= fp->f_advice->fa_end)
 		ret = fp->f_advice->fa_advice;
+	/* 'clean' only affects one operation, so we clear it */
+	if (fp->f_advice != NULL &&
+	    fp->f_advice->fa_advice == POSIX_FADV_CLEAN)
+	    fp->f_advice->fa_advice = POSIX_FADV_NORMAL;
 	mtx_unlock(mtxp);
 	return (ret);
 }
@@ -868,6 +872,9 @@ vn_write(struct file *fp, struct uio *uio, struct ucred *active_cred, int flags,
 		break;
 	case POSIX_FADV_RANDOM:
 		/* XXX: Is this correct? */
+		break;
+	case POSIX_FADV_CLEAN:
+		ioflag |= IO_CLEAN;
 		break;
 	}
 	orig_offset = uio->uio_offset;

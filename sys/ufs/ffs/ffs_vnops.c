@@ -842,6 +842,8 @@ ffs_write(ap)
 		} else if (ioflag & IO_DIRECT) {
 			bp->b_flags |= B_CLUSTEROK;
 			bawrite(bp);
+		} else if (ioflag & IO_CLEAN) {
+			brelse(bp);
 		} else {
 			bp->b_flags |= B_CLUSTEROK;
 			bdwrite(bp);
