@@ -150,12 +150,14 @@ __collate_load_tables_l(const char *encoding, struct xlocale_collate *table)
 		return (_LDP_ERROR);
 	}
 
-	if (strncmp(TMP, COLLATE_VERSION, COLLATE_STR_LEN) != 0) {
+	if (strncmp(TMP, COLLATE_VERSION, COLLATE_FORMAT_VERSION_LEN) != 0) {
 		(void) munmap(map, sbuf.st_size);
 		errno = EINVAL;
 		return (_LDP_ERROR);
 	}
-	TMP += COLLATE_STR_LEN;
+	TMP += COLLATE_FORMAT_VERSION_LEN;
+	strlcpy(table->header.version, TMP, sizeof(table->header.version));
+	TMP += XLOCALE_VERSION_LEN;
 
 	info = (void *)TMP;
 	TMP += sizeof (*info);

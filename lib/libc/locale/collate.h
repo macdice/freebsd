@@ -53,6 +53,8 @@
 #endif
 
 #define	COLLATE_STR_LEN		24		/* should be 64-bit multiple */
+
+#define	COLLATE_FORMAT_VERSION_LEN		12
 #define	COLLATE_VERSION		"BSD 1.0\n"
 
 #define	COLLATE_MAX_PRIORITY	(0x7fffffff)	/* max signed value */
@@ -69,7 +71,8 @@
 /*
  * The collate file format is as follows:
  *
- * char		version[COLLATE_STR_LEN];	// must be COLLATE_VERSION
+ * char	format_version[COLLATE_FORMAT_VERSION_LEN]; // must be COLLATE_VERSION
+ * char	data_version[XLOCALE_VERSION_LEN];	// NUL-terminated, may be empty
  * collate_info_t	info;			// see below, includes padding
  * collate_char_pri_t	char_data[256];		// 8 bit char values
  * collate_subst_t	subst[*];		// 0 or more substitutions

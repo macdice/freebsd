@@ -46,6 +46,7 @@ __FBSDID("$FreeBSD$");
 #include <limits.h>
 #include <locale.h>
 #include <dirent.h>
+#include "collate.h"
 #include "localedef.h"
 #include "parser.h"
 
@@ -59,6 +60,7 @@ int undefok = 0;
 int warnok = 0;
 static char *locname = NULL;
 static char locpath[PATH_MAX];
+char *version = NULL;
 
 const char *
 category_name(void)
@@ -236,6 +238,7 @@ usage(void)
 	(void) fprintf(stderr, "  -u encoding : assume encoding\n");
 	(void) fprintf(stderr, "  -w widths   : use screen widths file\n");
 	(void) fprintf(stderr, "  -i locsrc   : source file for locale\n");
+	(void) fprintf(stderr, "  -V version  : version string for locale\n");
 	exit(4);
 }
 
@@ -260,7 +263,7 @@ main(int argc, char **argv)
 
 	(void) setlocale(LC_ALL, "");
 
-	while ((c = getopt(argc, argv, "w:i:cf:u:vUD")) != -1) {
+	while ((c = getopt(argc, argv, "w:i:cf:u:vUDV:")) != -1) {
 		switch (c) {
 		case 'D':
 			bsd = 1;
@@ -289,6 +292,9 @@ main(int argc, char **argv)
 		case '?':
 			usage();
 			break;
+		case 'V':
+			version = optarg;
+			break;
 		}
 	}
 
@@ -298,6 +304,11 @@ main(int argc, char **argv)
 	locname = argv[argc - 1];
 	if (verbose) {
 		(void) printf("Processing locale %s.\n", locname);
+	}
+
+	if (version && strlen(version) >= XLOCALE_VERSION_LEN) {
+		(void) fprintf(stderr, "Version string too long.\n");
+		exit(1);
 	}
 
 	if (cfname) {
