@@ -131,6 +131,7 @@ typedef	__uid_t		uid_t;
 #define	SIGTHR		32	/* reserved by thread library. */
 #define	SIGLWP		SIGTHR
 #define	SIGLIBRT	33	/* reserved by real-time library. */
+#define	SIGDANGER	34	/* oom killer will soon run */
 #endif
 
 #define	SIGRTMIN	65

@@ -1673,6 +1673,18 @@ vm_pageout_mightbe_oom(struct vm_domain *vmd, int page_shortage,
 
 	vmd->vmd_oom = TRUE;
 	old_vote = atomic_fetchadd_int(&vm_pageout_oom_vote, 1);
+	if (old_vote == 0) {
+		/*
+		 * The first to vote notifies all processes that
+		 * an out-of-memory condition may be imminent.
+		 */
+		struct proc *p;
+		FOREACH_PROC_IN_SYSTEM(p) {
+			PROC_LOCK(p);
+			kern_psignal(p, SIGDANGER);
+			PROC_UNLOCK(p);
+		}
+	}
 	if (old_vote != vm_ndomains - 1)
 		return;
 
