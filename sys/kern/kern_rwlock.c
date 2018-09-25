@@ -1439,7 +1439,7 @@ __rw_assert(const volatile uintptr_t *c, int what, const char *file, int line)
 {
 	const struct rwlock *rw;
 
-	if (panicstr != NULL)
+	if (KERNEL_PANICKED())
 		return;
 
 	rw = rwlock2rw(c);

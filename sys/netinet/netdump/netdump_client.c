@@ -941,7 +941,7 @@ netdump_start(struct dumperinfo *di)
 	if (nd_enabled == 0)
 		return (EINVAL);
 
-	if (panicstr == NULL) {
+	if (!KERNEL_PANICKED()) {
 		printf(
 		    "netdump_start: netdump may only be used after a panic\n");
 		return (EINVAL);

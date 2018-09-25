@@ -324,7 +324,7 @@ maybe_preempt(struct thread *td)
 	 * The new thread should not preempt the current thread if any of the
 	 * following conditions are true:
 	 *
-	 *  - The kernel is in the throes of crashing (panicstr).
+	 *  - The kernel is in the throes of crashing (KERNEL_PANICKED()).
 	 *  - The current thread has a higher (numerically lower) or
 	 *    equivalent priority.  Note that this prevents curthread from
 	 *    trying to preempt to itself.
@@ -348,7 +348,7 @@ maybe_preempt(struct thread *td)
 			("maybe_preempt: trying to run inhibited thread"));
 	pri = td->td_priority;
 	cpri = ctd->td_priority;
-	if (panicstr != NULL || pri >= cpri /* || dumping */ ||
+	if (KERNEL_PANICKED() || pri >= cpri /* || dumping */ ||
 	    TD_IS_INHIBITED(ctd))
 		return (0);
 #ifndef FULL_PREEMPTION
@@ -1120,7 +1120,7 @@ forward_wakeup(int cpunum)
 	if ((!forward_wakeup_enabled) ||
 	     (forward_wakeup_use_mask == 0 && forward_wakeup_use_loop == 0))
 		return (0);
-	if (!smp_started || panicstr)
+	if (!smp_started || KERNEL_PANICKED())
 		return (0);
 
 	forward_wakeups_requested++;

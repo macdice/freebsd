@@ -198,7 +198,8 @@ SYSCTL_INT(_kern, OID_AUTO, kerneldump_gzlevel, CTLFLAG_RWTUN,
 
 /*
  * Variable panicstr contains argument to first call to panic; used as flag
- * to indicate that the kernel has already called panic.
+ * to indicate that the kernel has panicked.  Check with the macro
+ * KERNEL_PANICKED() rather than accessing it directly.
  */
 const char *panicstr;
 
@@ -735,7 +736,7 @@ kassert_panic(const char *fmt, ...)
 	 * If we are suppressing secondary panics, log the warning but do not
 	 * re-enter panic/kdb.
 	 */
-	if (panicstr != NULL && kassert_suppress_in_panic) {
+	if (KERNEL_PANICKED() && kassert_suppress_in_panic) {
 		if (kassert_do_log) {
 			printf("KASSERT failed: %s\n", buf);
 #ifdef KDB
@@ -933,7 +934,7 @@ kthread_shutdown(void *arg, int howto)
 	struct thread *td;
 	int error;
 
-	if (panicstr)
+	if (KERNEL_PANICKED())
 		return;
 
 	td = (struct thread *)arg;
@@ -1561,7 +1562,7 @@ dump_init_header(const struct dumperinfo *di, struct kerneldumpheader *kdh,
 	dstsize = sizeof(kdh->versionstring);
 	if (strlcpy(kdh->versionstring, version, dstsize) >= dstsize)
 		kdh->versionstring[dstsize - 2] = '\n';
-	if (panicstr != NULL)
+	if (KERNEL_PANICKED())
 		strlcpy(kdh->panicstring, panicstr, sizeof(kdh->panicstring));
 	if (di->kdcomp != NULL)
 		kdh->compression = di->kdcomp->kdc_format;

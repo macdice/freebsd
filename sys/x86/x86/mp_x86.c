@@ -1595,7 +1595,7 @@ smp_targeted_tlb_shootdown(cpuset_t mask, u_int vector, pmap_t pmap,
 	int cpu;
 
 	/* It is not necessary to signal other CPUs while in the debugger. */
-	if (kdb_active || panicstr != NULL)
+	if (kdb_active || KERNEL_PANICKED())
 		return;
 
 	/*

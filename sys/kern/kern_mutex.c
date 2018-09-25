@@ -1047,7 +1047,7 @@ __mtx_assert(const volatile uintptr_t *c, int what, const char *file, int line)
 {
 	const struct mtx *m;
 
-	if (panicstr != NULL || dumping || SCHEDULER_STOPPED())
+	if (KERNEL_PANICKED() || dumping || SCHEDULER_STOPPED())
 		return;
 
 	m = mtxlock2mtx(c);
@@ -1205,7 +1205,7 @@ _mtx_lock_indefinite_check(struct mtx *m, struct lock_delay_arg *ldap)
 	struct thread *td;
 
 	ldap->spin_cnt++;
-	if (ldap->spin_cnt < 60000000 || kdb_active || panicstr != NULL)
+	if (ldap->spin_cnt < 60000000 || kdb_active || KERNEL_PANICKED())
 		DELAY(1);
 	else {
 		td = mtx_owner(m);

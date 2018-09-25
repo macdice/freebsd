@@ -89,6 +89,8 @@ enum VM_GUEST { VM_GUEST_NO = 0, VM_GUEST_VM, VM_GUEST_XEN, VM_GUEST_HV,
 void	panic(const char *, ...) __dead2 __printflike(1, 2);
 void	vpanic(const char *, __va_list) __dead2 __printflike(1, 0);
 
+#define KERNEL_PANICKED() (__predict_false(panicstr != NULL))
+
 #if defined(WITNESS) || defined(INVARIANT_SUPPORT)
 #ifdef KASSERT_PANIC_OPTIONAL
 void	kassert_panic(const char *fmt, ...)  __printflike(1, 2);

@@ -894,7 +894,7 @@ witness_init(struct lock_object *lock, const char *type)
 	 * it to the pending_locks list.  If it is not too early, then enroll
 	 * the lock now.
 	 */
-	if (witness_watch < 1 || panicstr != NULL ||
+	if (witness_watch < 1 || KERNEL_PANICKED() ||
 	    (lock->lo_flags & LO_WITNESS) == 0)
 		lock->lo_witness = NULL;
 	else if (witness_cold) {
@@ -1072,7 +1072,7 @@ int
 witness_defineorder(struct lock_object *lock1, struct lock_object *lock2)
 {
 
-	if (witness_watch == -1 || panicstr != NULL)
+	if (witness_watch == -1 || KERNEL_PANICKED())
 		return (0);
 
 	/* Require locks that witness knows about. */
@@ -1113,7 +1113,7 @@ witness_checkorder(struct lock_object *lock, int flags, const char *file,
 	int i, j;
 
 	if (witness_cold || witness_watch < 1 || lock->lo_witness == NULL ||
-	    panicstr != NULL)
+	    KERNEL_PANICKED())
 		return;
 
 	w = lock->lo_witness;
@@ -1457,7 +1457,7 @@ witness_lock(struct lock_object *lock, int flags, const char *file, int line)
 	struct thread *td;
 
 	if (witness_cold || witness_watch == -1 || lock->lo_witness == NULL ||
-	    panicstr != NULL)
+	    KERNEL_PANICKED())
 		return;
 	w = lock->lo_witness;
 	td = curthread;
@@ -1514,7 +1514,7 @@ witness_upgrade(struct lock_object *lock, int flags, const char *file, int line)
 	struct lock_class *class;
 
 	KASSERT(witness_cold == 0, ("%s: witness_cold", __func__));
-	if (lock->lo_witness == NULL || witness_watch == -1 || panicstr != NULL)
+	if (lock->lo_witness == NULL || witness_watch == -1 || KERNEL_PANICKED())
 		return;
 	class = LOCK_CLASS(lock);
 	if (witness_watch) {
@@ -1560,7 +1560,7 @@ witness_downgrade(struct lock_object *lock, int flags, const char *file,
 	struct lock_class *class;
 
 	KASSERT(witness_cold == 0, ("%s: witness_cold", __func__));
-	if (lock->lo_witness == NULL || witness_watch == -1 || panicstr != NULL)
+	if (lock->lo_witness == NULL || witness_watch == -1 || KERNEL_PANICKED())
 		return;
 	class = LOCK_CLASS(lock);
 	if (witness_watch) {
@@ -1608,7 +1608,7 @@ witness_unlock(struct lock_object *lock, int flags, const char *file, int line)
 	register_t s;
 	int i, j;
 
-	if (witness_cold || lock->lo_witness == NULL || panicstr != NULL)
+	if (witness_cold || lock->lo_witness == NULL || KERNEL_PANICKED())
 		return;
 	td = curthread;
 	class = LOCK_CLASS(lock);
@@ -1714,7 +1714,7 @@ witness_thread_exit(struct thread *td)
 	int i, n;
 
 	lle = td->td_sleeplocks;
-	if (lle == NULL || panicstr != NULL)
+	if (lle == NULL || KERNEL_PANICKED())
 		return;
 	if (lle->ll_count != 0) {
 		for (n = 0; lle != NULL; lle = lle->ll_next)
@@ -1749,7 +1749,7 @@ witness_warn(int flags, struct lock_object *lock, const char *fmt, ...)
 	va_list ap;
 	int i, n;
 
-	if (witness_cold || witness_watch < 1 || panicstr != NULL)
+	if (witness_cold || witness_watch < 1 || KERNEL_PANICKED())
 		return (0);
 	n = 0;
 	td = curthread;
@@ -1841,7 +1841,7 @@ enroll(const char *description, struct lock_class *lock_class)
 
 	MPASS(description != NULL);
 
-	if (witness_watch == -1 || panicstr != NULL)
+	if (witness_watch == -1 || KERNEL_PANICKED())
 		return (NULL);
 	if ((lock_class->lc_flags & LC_SPINLOCK)) {
 		if (witness_skipspin)
@@ -2317,7 +2317,7 @@ witness_save(struct lock_object *lock, const char **filep, int *linep)
 	if (SCHEDULER_STOPPED())
 		return;
 	KASSERT(witness_cold == 0, ("%s: witness_cold", __func__));
-	if (lock->lo_witness == NULL || witness_watch == -1 || panicstr != NULL)
+	if (lock->lo_witness == NULL || witness_watch == -1 || KERNEL_PANICKED())
 		return;
 	class = LOCK_CLASS(lock);
 	if (class->lc_flags & LC_SLEEPLOCK)
@@ -2352,7 +2352,7 @@ witness_restore(struct lock_object *lock, const char *file, int line)
 	if (SCHEDULER_STOPPED())
 		return;
 	KASSERT(witness_cold == 0, ("%s: witness_cold", __func__));
-	if (lock->lo_witness == NULL || witness_watch == -1 || panicstr != NULL)
+	if (lock->lo_witness == NULL || witness_watch == -1 || KERNEL_PANICKED())
 		return;
 	class = LOCK_CLASS(lock);
 	if (class->lc_flags & LC_SLEEPLOCK)
@@ -2382,7 +2382,7 @@ witness_assert(const struct lock_object *lock, int flags, const char *file,
 	struct lock_instance *instance;
 	struct lock_class *class;
 
-	if (lock->lo_witness == NULL || witness_watch < 1 || panicstr != NULL)
+	if (lock->lo_witness == NULL || witness_watch < 1 || KERNEL_PANICKED())
 		return;
 	class = LOCK_CLASS(lock);
 	if ((class->lc_flags & LC_SLEEPLOCK) != 0)
@@ -2454,7 +2454,7 @@ witness_setflag(struct lock_object *lock, int flag, int set)
 	struct lock_instance *instance;
 	struct lock_class *class;
 
-	if (lock->lo_witness == NULL || witness_watch == -1 || panicstr != NULL)
+	if (lock->lo_witness == NULL || witness_watch == -1 || KERNEL_PANICKED())
 		return;
 	class = LOCK_CLASS(lock);
 	if (class->lc_flags & LC_SLEEPLOCK)
