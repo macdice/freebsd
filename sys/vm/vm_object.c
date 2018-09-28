@@ -282,6 +282,7 @@ _vm_object_allocate(objtype_t type, vm_pindex_t size, vm_object_t object)
 	object->handle = NULL;
 	object->backing_object = NULL;
 	object->backing_object_offset = (vm_ooffset_t) 0;
+	object->path = NULL;
 #if VM_NRESERVLEVEL > 0
 	LIST_INIT(&object->rvq);
 #endif
@@ -664,6 +665,10 @@ retry:
 			return;
 		}
 doterm:
+		if (object->path != NULL) {
+			free(object->path, M_TEMP);
+			object->path = NULL;
+		}
 		umtx_shm_object_terminated(object);
 		temp = object->backing_object;
 		if (temp != NULL) {

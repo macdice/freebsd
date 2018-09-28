@@ -2483,6 +2483,8 @@ kern_proc_vmmap_out(struct proc *p, struct sbuf *sb, ssize_t maxlen, int flags)
 			switch (lobj->type) {
 			case OBJT_DEFAULT:
 				kve->kve_type = KVME_TYPE_DEFAULT;
+				if (lobj->path != NULL)
+					fullpath = lobj->path;
 				break;
 			case OBJT_VNODE:
 				kve->kve_type = KVME_TYPE_VNODE;
@@ -2499,6 +2501,8 @@ kern_proc_vmmap_out(struct proc *p, struct sbuf *sb, ssize_t maxlen, int flags)
 				} else {
 					kve->kve_type = KVME_TYPE_SWAP;
 				}
+				if (lobj->path != NULL)
+					fullpath = lobj->path;
 				break;
 			case OBJT_DEVICE:
 				kve->kve_type = KVME_TYPE_DEVICE;

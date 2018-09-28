@@ -528,7 +528,7 @@ retry:
  * routines.
  */
 struct shmfd *
-shm_alloc(struct ucred *ucred, mode_t mode)
+shm_alloc(const char *path, struct ucred *ucred, mode_t mode)
 {
 	struct shmfd *shmfd;
 	int ino;
@@ -542,6 +542,8 @@ shm_alloc(struct ucred *ucred, mode_t mode)
 	    shmfd->shm_size, VM_PROT_DEFAULT, 0, ucred);
 	KASSERT(shmfd->shm_object != NULL, ("shm_create: vm_pager_allocate"));
 	shmfd->shm_object->pg_color = 0;
+	if (path != NULL)
+	    shmfd->shm_object->path = strdup(path, M_SHMFD);
 	VM_OBJECT_WLOCK(shmfd->shm_object);
 	vm_object_clear_flag(shmfd->shm_object, OBJ_ONEMAPPING);
 	vm_object_set_flag(shmfd->shm_object, OBJ_COLORED | OBJ_NOSPLIT);
@@ -736,7 +738,7 @@ kern_shm_open(struct thread *td, const char *userpath, int flags, mode_t mode,
 			fdrop(fp, td);
 			return (EINVAL);
 		}
-		shmfd = shm_alloc(td->td_ucred, cmode);
+		shmfd = shm_alloc(NULL, td->td_ucred, cmode);
 	} else {
 		path = malloc(MAXPATHLEN, M_SHMFD, M_WAITOK);
 		pr_path = td->td_ucred->cr_prison->pr_path;
@@ -772,7 +774,7 @@ kern_shm_open(struct thread *td, const char *userpath, int flags, mode_t mode,
 				    path);
 				if (error == 0) {
 #endif
-					shmfd = shm_alloc(td->td_ucred, cmode);
+					shmfd = shm_alloc(path, td->td_ucred, cmode);
 					shm_insert(path, fnv, shmfd);
 #ifdef MAC
 				}

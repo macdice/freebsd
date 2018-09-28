@@ -118,6 +118,7 @@ struct vm_object {
 	TAILQ_ENTRY(vm_object) pager_object_list; /* list of all objects of this pager type */
 	LIST_HEAD(, vm_reserv) rvq;	/* list of reservations */
 	void *handle;
+	void *path;			/* optional path, informational only */
 	union {
 		/*
 		 * VNode pager
