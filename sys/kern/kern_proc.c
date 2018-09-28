@@ -2454,7 +2454,8 @@ kern_proc_vmmap_out(struct proc *p, struct sbuf *sb, ssize_t maxlen, int flags)
 	struct vattr va;
 	vm_map_t map;
 	vm_object_t obj, tobj, lobj;
-	char *fullpath, *freepath;
+	char *pr_path, *fullpath, *freepath;
+	size_t pr_pathlen;
 	struct kinfo_vmentry *kve;
 	struct ucred *cred;
 	struct vnode *vp;
@@ -2463,6 +2464,9 @@ kern_proc_vmmap_out(struct proc *p, struct sbuf *sb, ssize_t maxlen, int flags)
 	unsigned int last_timestamp;
 	int error;
 	bool super;
+
+	pr_path = curthread->td_ucred->cr_prison->pr_path;
+	pr_pathlen = strlen(pr_path);
 
 	PROC_LOCK_ASSERT(p, MA_OWNED);
 
@@ -2542,6 +2546,16 @@ kern_proc_vmmap_out(struct proc *p, struct sbuf *sb, ssize_t maxlen, int flags)
 			kve->kve_type = vm_object_kvme_type(lobj, &vp);
 			if (vp != NULL)
 				vref(vp);
+			else if (lobj->path != NULL) {
+				freepath = strdup(lobj->path, M_TEMP);
+				/* Adjust visible path for jailed callers. */
+				if (!lobj->path_jail_adjust)
+					fullpath = freepath;
+				else if (strcmp(pr_path, "/") == 0)
+					fullpath = freepath;
+				else if (strncmp(pr_path, freepath, pr_pathlen) == 0)
+					fullpath = freepath + pr_pathlen;
+			}
 			if (lobj != obj)
 				VM_OBJECT_RUNLOCK(lobj);
 

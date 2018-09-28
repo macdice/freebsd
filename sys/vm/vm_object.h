@@ -118,6 +118,8 @@ struct vm_object {
 	TAILQ_ENTRY(vm_object) pager_object_list; /* list of all objects of this pager type */
 	LIST_HEAD(, vm_reserv) rvq;	/* list of reservations */
 	void *handle;
+	char *path;			/* optional path for display by procstat */
+	bool path_jail_adjust;		/* whether it should be adjusted by jail */
 	union {
 		/*
 		 * VNode pager
@@ -343,6 +345,7 @@ boolean_t vm_object_sync(vm_object_t, vm_ooffset_t, vm_size_t, boolean_t,
 void vm_object_unwire(vm_object_t object, vm_ooffset_t offset,
     vm_size_t length, uint8_t queue);
 struct vnode *vm_object_vnode(vm_object_t object);
+void vm_object_set_path(vm_object_t object, const char *path, bool jail_adjust);
 #endif				/* _KERNEL */
 
 #endif				/* _VM_OBJECT_ */

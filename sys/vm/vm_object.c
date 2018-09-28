@@ -105,6 +105,8 @@ __FBSDID("$FreeBSD$");
 #include <vm/vm_reserv.h>
 #include <vm/uma.h>
 
+MALLOC_DEFINE(M_VMOBJECT, "vmobject", "vmobject");
+
 static int old_msync;
 SYSCTL_INT(_vm, OID_AUTO, old_msync, CTLFLAG_RW, &old_msync, 0,
     "Use old (insecure) msync behavior");
@@ -283,6 +285,8 @@ _vm_object_allocate(objtype_t type, vm_pindex_t size, vm_object_t object)
 	object->handle = NULL;
 	object->backing_object = NULL;
 	object->backing_object_offset = (vm_ooffset_t) 0;
+	object->path = NULL;
+	object->path_jail_adjust = false;
 #if VM_NRESERVLEVEL > 0
 	LIST_INIT(&object->rvq);
 #endif
@@ -684,6 +688,9 @@ vm_object_destroy(vm_object_t object)
 		crfree(object->cred);
 		object->cred = NULL;
 	}
+
+	if (object->path != NULL)
+		free(object->path, M_VMOBJECT);
 
 	/*
 	 * Free the space for the object.
@@ -2454,6 +2461,21 @@ sysctl_vm_object_list(SYSCTL_HANDLER_ARGS)
 SYSCTL_PROC(_vm, OID_AUTO, objects, CTLTYPE_STRUCT | CTLFLAG_RW | CTLFLAG_SKIP |
     CTLFLAG_MPSAFE, NULL, 0, sysctl_vm_object_list, "S,kinfo_vmobject",
     "List of VM objects");
+
+/*
+ * Set the path that should be displayed by procstat -v for this object.
+ * If jail_adjust is true, remove the jail prefix when displaying it.
+ */
+void
+vm_object_set_path(vm_object_t object, const char *path, bool jail_adjust)
+{
+	VM_OBJECT_ASSERT_LOCKED(object);
+
+	if (object->path != NULL)
+		free(object->path, M_VMOBJECT);
+	object->path = strdup(path, M_VMOBJECT);
+	object->path_jail_adjust = jail_adjust;
+}
 
 #include "opt_ddb.h"
 #ifdef DDB
