@@ -227,6 +227,7 @@ struct shmfd {
 
 	struct label	*shm_label;		/* MAC label */
 	const char	*shm_path;
+	int		shm_partition;
 
 	struct rangelock shm_rl;
 	struct mtx	shm_mtx;

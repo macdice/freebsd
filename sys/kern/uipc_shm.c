@@ -60,7 +60,7 @@ __FBSDID("$FreeBSD$");
 #include <sys/fcntl.h>
 #include <sys/file.h>
 #include <sys/filedesc.h>
-#include <sys/fnv_hash.h>
+#include <sys/hash.h>
 #include <sys/kernel.h>
 #include <sys/uio.h>
 #include <sys/signal.h>
@@ -101,27 +101,44 @@ __FBSDID("$FreeBSD$");
 #include <vm/vm_pager.h>
 #include <vm/swap_pager.h>
 
+#define SHM_LOG2_NPARTITIONS 5		/* = 32 partitions */
+#define SHM_NPARTITIONS (1 << SHM_LOG2_NPARTITIONS)
+#define SHM_INITIAL_TABLE_SIZE 32
+
 struct shm_mapping {
 	char		*sm_path;
-	Fnv32_t		sm_fnv;
+	uint32_t	sm_hash;
 	struct shmfd	*sm_shmfd;
 	LIST_ENTRY(shm_mapping) sm_link;
 };
 
+LIST_HEAD(shm_bucket, shm_mapping);
+
+struct shm_partition {
+	struct sx	sp_lock;
+	u_long		sp_entries;
+	u_long		sp_mask;
+	struct shm_bucket *sp_table;
+};
+
 static MALLOC_DEFINE(M_SHMFD, "shmfd", "shared memory file descriptor");
-static LIST_HEAD(, shm_mapping) *shm_dictionary;
-static struct sx shm_dict_lock;
+static struct shm_partition shm_partitions[SHM_NPARTITIONS];
 static struct mtx shm_timestamp_lock;
-static u_long shm_hash;
 static struct unrhdr *shm_ino_unr;
 static dev_t shm_dev_ino;
 
-#define	SHM_HASH(fnv)	(&shm_dictionary[(fnv) & shm_hash])
+/* The high-order bits select the partition. */
+#define	SHM_PARTITION(hash) \
+	((hash) >> ((sizeof(hash) * CHAR_BIT) - SHM_LOG2_NPARTITIONS))
+/* The low-order bits select the bucket. */
+#define SHM_BUCKET(partition, hash) \
+	(&shm_partitions[(partition)].sp_table[(hash) & \
+	 shm_partitions[(partition)].sp_mask])
 
 static void	shm_init(void *arg);
-static void	shm_insert(char *path, Fnv32_t fnv, struct shmfd *shmfd);
-static struct shmfd *shm_lookup(char *path, Fnv32_t fnv);
-static int	shm_remove(char *path, Fnv32_t fnv, struct ucred *ucred);
+static void	shm_insert(char *path, int partition, uint32_t hash, struct shmfd *shmfd);
+static struct shmfd *shm_lookup(char *path, int partition, uint32_t hash);
+static int	shm_remove(char *path, int partition, uint32_t hash, struct ucred *ucred);
 
 static fo_rdwr_t	shm_read;
 static fo_rdwr_t	shm_write;
@@ -617,15 +634,20 @@ shm_access(struct shmfd *shmfd, struct ucred *ucred, int flags)
 /*
  * Dictionary management.  We maintain an in-kernel dictionary to map
  * paths to shmfd objects.  We use the FNV hash on the path to store
- * the mappings in a hash table.
+ * the mappings in a partitioned hash table.
  */
 static void
 shm_init(void *arg)
 {
+	int i;
 
 	mtx_init(&shm_timestamp_lock, "shm timestamps", NULL, MTX_DEF);
-	sx_init(&shm_dict_lock, "shm dictionary");
-	shm_dictionary = hashinit(1024, M_SHMFD, &shm_hash);
+	for (i = 0; i < SHM_NPARTITIONS; ++i) {
+	    sx_init(&shm_partitions[i].sp_lock, "shm dictionary");
+	    shm_partitions[i].sp_table = hashinit(SHM_INITIAL_TABLE_SIZE, M_SHMFD,
+			    &shm_partitions[i].sp_mask);
+	    shm_partitions[i].sp_entries = 0;
+	}
 	shm_ino_unr = new_unrhdr(1, INT32_MAX, NULL);
 	KASSERT(shm_ino_unr != NULL, ("shm fake inodes not initialized"));
 	shm_dev_ino = devfs_alloc_cdp_inode();
@@ -634,12 +656,12 @@ shm_init(void *arg)
 SYSINIT(shm_init, SI_SUB_SYSV_SHM, SI_ORDER_ANY, shm_init, NULL);
 
 static struct shmfd *
-shm_lookup(char *path, Fnv32_t fnv)
+shm_lookup(char *path, int partition, uint32_t hash)
 {
 	struct shm_mapping *map;
 
-	LIST_FOREACH(map, SHM_HASH(fnv), sm_link) {
-		if (map->sm_fnv != fnv)
+	LIST_FOREACH(map, SHM_BUCKET(partition, hash), sm_link) {
+		if (map->sm_hash != hash)
 			continue;
 		if (strcmp(map->sm_path, path) == 0)
 			return (map->sm_shmfd);
@@ -649,26 +671,57 @@ shm_lookup(char *path, Fnv32_t fnv)
 }
 
 static void
-shm_insert(char *path, Fnv32_t fnv, struct shmfd *shmfd)
+shm_expand_if_necessary(int partition)
+{
+	struct shm_partition *p;
+
+	/* Would the load factor in this partition exceed 1 with one more entry? */
+	p = &shm_partitions[partition];
+	if (p->sp_entries >= p->sp_mask && p->sp_mask < INT_MAX / 2) {
+		struct shm_mapping *map;
+		struct shm_mapping *map2;
+		struct shm_bucket *old_table = p->sp_table;
+		u_long old_mask = p->sp_mask;
+		int old_nbuckets = old_mask + 1;
+		int i;
+
+		p->sp_table = hashinit(old_nbuckets * 2, M_SHMFD, &p->sp_mask);
+		for (i = 0; i < old_nbuckets; ++i) {
+			LIST_FOREACH_SAFE(map, &old_table[i], sm_link, map2) {
+				LIST_REMOVE(map, sm_link);
+				LIST_INSERT_HEAD(SHM_BUCKET(partition, map->sm_hash), map,
+						 sm_link);
+			}
+		}
+		hashdestroy(old_table, M_SHMFD, old_mask);
+	}
+}
+
+static void
+shm_insert(char *path, int partition, uint32_t hash, struct shmfd *shmfd)
 {
 	struct shm_mapping *map;
 
+	shm_expand_if_necessary(partition);
+
 	map = malloc(sizeof(struct shm_mapping), M_SHMFD, M_WAITOK);
 	map->sm_path = path;
-	map->sm_fnv = fnv;
+	map->sm_hash = hash;
 	map->sm_shmfd = shm_hold(shmfd);
 	shmfd->shm_path = path;
-	LIST_INSERT_HEAD(SHM_HASH(fnv), map, sm_link);
+	shmfd->shm_partition = partition;
+	shm_partitions[partition].sp_entries++;
+	LIST_INSERT_HEAD(SHM_BUCKET(partition, hash), map, sm_link);
 }
 
 static int
-shm_remove(char *path, Fnv32_t fnv, struct ucred *ucred)
+shm_remove(char *path, int partition, uint32_t hash, struct ucred *ucred)
 {
 	struct shm_mapping *map;
 	int error;
 
-	LIST_FOREACH(map, SHM_HASH(fnv), sm_link) {
-		if (map->sm_fnv != fnv)
+	LIST_FOREACH(map, SHM_BUCKET(partition, hash), sm_link) {
+		if (map->sm_hash != hash)
 			continue;
 		if (strcmp(map->sm_path, path) == 0) {
 #ifdef MAC
@@ -685,6 +738,7 @@ shm_remove(char *path, Fnv32_t fnv, struct ucred *ucred)
 			shm_drop(map->sm_shmfd);
 			free(map->sm_path, M_SHMFD);
 			free(map, M_SHMFD);
+			shm_partitions[partition].sp_entries--;
 			return (0);
 		}
 	}
@@ -702,9 +756,10 @@ kern_shm_open(struct thread *td, const char *userpath, int flags, mode_t mode,
 	char *path;
 	const char *pr_path;
 	size_t pr_pathlen;
-	Fnv32_t fnv;
+	uint32_t hash;
 	mode_t cmode;
 	int fd, error;
+	int partition;
 
 #ifdef CAPABILITY_MODE
 	/*
@@ -763,9 +818,13 @@ kern_shm_open(struct thread *td, const char *userpath, int flags, mode_t mode,
 		}
 
 		AUDIT_ARG_UPATH1_CANON(path);
-		fnv = fnv_32_str(path, FNV1_32_INIT);
-		sx_xlock(&shm_dict_lock);
-		shmfd = shm_lookup(path, fnv);
+		hash = murmur3_32_hash(path, strlen(path), 0);
+		partition = SHM_PARTITION(hash);
+		if (flags & O_CREAT)
+		    sx_xlock(&shm_partitions[partition].sp_lock);
+		else
+		    sx_slock(&shm_partitions[partition].sp_lock);
+		shmfd = shm_lookup(path, partition, hash);
 		if (shmfd == NULL) {
 			/* Object does not yet exist, create it if requested. */
 			if (flags & O_CREAT) {
@@ -775,7 +834,7 @@ kern_shm_open(struct thread *td, const char *userpath, int flags, mode_t mode,
 				if (error == 0) {
 #endif
 					shmfd = shm_alloc(path, td->td_ucred, cmode);
-					shm_insert(path, fnv, shmfd);
+					shm_insert(path, partition, hash, shmfd);
 #ifdef MAC
 				}
 #endif
@@ -819,7 +878,10 @@ kern_shm_open(struct thread *td, const char *userpath, int flags, mode_t mode,
 			if (error == 0)
 				shm_hold(shmfd);
 		}
-		sx_xunlock(&shm_dict_lock);
+		if (flags & O_CREAT)
+		    sx_xunlock(&shm_partitions[partition].sp_lock);
+		else
+		    sx_sunlock(&shm_partitions[partition].sp_lock);
 
 		if (error) {
 			fdclose(td, fp, fd);
@@ -850,7 +912,8 @@ sys_shm_unlink(struct thread *td, struct shm_unlink_args *uap)
 	char *path;
 	const char *pr_path;
 	size_t pr_pathlen;
-	Fnv32_t fnv;
+	uint32_t hash;
+	int partition;
 	int error;
 
 	path = malloc(MAXPATHLEN, M_TEMP, M_WAITOK);
@@ -868,10 +931,11 @@ sys_shm_unlink(struct thread *td, struct shm_unlink_args *uap)
 		ktrnamei(path);
 #endif
 	AUDIT_ARG_UPATH1_CANON(path);
-	fnv = fnv_32_str(path, FNV1_32_INIT);
-	sx_xlock(&shm_dict_lock);
-	error = shm_remove(path, fnv, td->td_ucred);
-	sx_xunlock(&shm_dict_lock);
+	hash = murmur3_32_hash(path, strlen(path), 0);
+	partition = SHM_PARTITION(hash);
+	sx_xlock(&shm_partitions[partition].sp_lock);
+	error = shm_remove(path, partition, hash, td->td_ucred);
+	sx_xunlock(&shm_partitions[partition].sp_lock);
 	free(path, M_TEMP);
 
 	return (error);
@@ -1095,16 +1159,18 @@ shm_fill_kinfo(struct file *fp, struct kinfo_file *kif, struct filedesc *fdp)
 	const char *path, *pr_path;
 	struct shmfd *shmfd;
 	size_t pr_pathlen;
+	int partition;
 
 	kif->kf_type = KF_TYPE_SHM;
 	shmfd = fp->f_data;
+	partition = shmfd->shm_partition;
 
 	mtx_lock(&shm_timestamp_lock);
 	kif->kf_un.kf_file.kf_file_mode = S_IFREG | shmfd->shm_mode;	/* XXX */
 	mtx_unlock(&shm_timestamp_lock);
 	kif->kf_un.kf_file.kf_file_size = shmfd->shm_size;
 	if (shmfd->shm_path != NULL) {
-		sx_slock(&shm_dict_lock);
+		sx_slock(&shm_partitions[partition].sp_lock);
 		if (shmfd->shm_path != NULL) {
 			path = shmfd->shm_path;
 			pr_path = curthread->td_ucred->cr_prison->pr_path;
@@ -1117,7 +1183,7 @@ shm_fill_kinfo(struct file *fp, struct kinfo_file *kif, struct filedesc *fdp)
 			}
 			strlcpy(kif->kf_path, path, sizeof(kif->kf_path));
 		}
-		sx_sunlock(&shm_dict_lock);
+		sx_sunlock(&shm_partitions[partition].sp_lock);
 	}
 	return (0);
 }
