@@ -61,6 +61,7 @@ void	print_kmsqtotal(struct msginfo msginfo);
 void	print_kmsqheader(int option);
 void	print_kmsqptr(int i, int option, struct msqid_kernel *kmsqptr);
 void	print_kshmtotal(struct shminfo shminfo);
+void	print_kshmposixheader(int option);
 void	print_kshmheader(int option);
 void	print_kshmptr(int i, int option, struct shmid_kernel *kshmptr);
 void	print_ksemtotal(struct seminfo seminfo);
@@ -118,7 +119,7 @@ main(int argc, char *argv[])
 	u_long  shmidx;
 	uid_t   uid = 0;
 
-	while ((i = getopt(argc, argv, "MmQqSsabC:cN:optTu:y")) != -1)
+	while ((i = getopt(argc, argv, "MmQqSsabC:cN:oPptTu:y")) != -1)
 		switch (i) {
 		case 'a':
 			option |= BIGGEST | CREATOR | OUTSTANDING | PID | TIME;
@@ -143,6 +144,9 @@ main(int argc, char *argv[])
 			break;
 		case 'o':
 			option |= OUTSTANDING;
+			break;
+		case 'P':
+			display = SHMPOSIX;
 			break;
 		case 'p':
 			option |= PID;
@@ -268,6 +272,10 @@ main(int argc, char *argv[])
 			    "SVID shared memory facility "
 			    "not configured in the system\n");
 		}
+
+	if ((display & SHMPOSIX)) {
+		print_kshmposixheader(option);
+	}
 
 	kget(X_SEMINFO, &seminfo, sizeof(seminfo));
 	if ((display & (SEMINFO | SEMTOTAL))) {
@@ -428,6 +436,15 @@ print_kshmheader(int option)
 	if (option & TIME)
 		printf(" %-8s %-8s %-8s", "ATIME", "DTIME", "CTIME");
 	printf("\n");
+}
+
+void
+print_kshmposixheader(int options)
+{
+	(void) options;
+	printf("POSIX Shared Memory:\n");
+	printf("%-11s %-8s %-8s %s\n",
+	    "MODE", "OWNER", "GROUP", "PATH");
 }
 
 void

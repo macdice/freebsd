@@ -155,6 +155,10 @@ struct fileops shm_ops = {
 
 FEATURE(posix_shm, "POSIX shared memory");
 
+SYSCTL_PROC(_kern_ipc, OID_AUTO, posix_shm, CLTYPE_OPAQUE|CTLFLAG_RD|
+	    CTLFLAG_CAPRD|CTLFLAG_MPSAFE, NULL, 0, sysctl_kern_ipc_shm, "",
+	    "List of existing POSIX shm segment names");
+
 static int
 uiomove_object_page(vm_object_t obj, size_t len, struct uio *uio)
 {

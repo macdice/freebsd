@@ -46,6 +46,7 @@
 #define	MSGTOTAL	8
 #define	SEMINFO		16
 #define	SEMTOTAL	32
+#define	SHMPOSIX	64
 
 #define IPC_TO_STR(x) (x == 'Q' ? "msq" : (x == 'M' ? "shm" : "sem"))
 #define IPC_TO_STRING(x) (x == 'Q' ? "message queue" : \
