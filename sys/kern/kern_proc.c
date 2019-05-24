@@ -2536,12 +2536,14 @@ kern_proc_vmmap_out(struct proc *p, struct sbuf *sb, ssize_t maxlen, int flags)
 		last_timestamp = map->timestamp;
 		vm_map_unlock_read(map);
 
-		freepath = NULL;
-		fullpath = "";
 		if (lobj != NULL) {
 			kve->kve_type = vm_object_kvme_type(lobj, &vp);
 			if (vp != NULL)
 				vref(vp);
+			else if (lobj->path_info != NULL)
+				lobj->path_info(lobj->path_info_data,
+						kve->kve_path,
+						sizeof(kve->kve_path));
 			if (lobj != obj)
 				VM_OBJECT_RUNLOCK(lobj);
 
@@ -2549,6 +2551,8 @@ kern_proc_vmmap_out(struct proc *p, struct sbuf *sb, ssize_t maxlen, int flags)
 			kve->kve_shadow_count = obj->shadow_count;
 			VM_OBJECT_RUNLOCK(obj);
 			if (vp != NULL) {
+				freepath = NULL;
+				fullpath = "";
 				vn_fullpath(curthread, vp, &fullpath,
 				    &freepath);
 				kve->kve_vn_type = vntype_to_kinfo(vp->v_type);
@@ -2568,16 +2572,16 @@ kern_proc_vmmap_out(struct proc *p, struct sbuf *sb, ssize_t maxlen, int flags)
 					kve->kve_status = KF_ATTR_VALID;
 				}
 				vput(vp);
+				strlcpy(kve->kve_path, fullpath,
+					sizeof(kve->kve_path));
+				if (freepath != NULL)
+					free(freepath, M_TEMP);
 			}
 		} else {
 			kve->kve_type = KVME_TYPE_NONE;
 			kve->kve_ref_count = 0;
 			kve->kve_shadow_count = 0;
 		}
-
-		strlcpy(kve->kve_path, fullpath, sizeof(kve->kve_path));
-		if (freepath != NULL)
-			free(freepath, M_TEMP);
 
 		/* Pack record size down */
 		if ((flags & KERN_VMMAP_PACK_KINFO) != 0)

@@ -172,6 +172,8 @@ struct vm_object {
 	struct ucred *cred;
 	vm_ooffset_t charge;
 	void *umtx_data;
+	void *path_info_data;		/* callback + data for procstat path */
+	void (*path_info)(void *data, char *buffer, size_t size);
 };
 
 /*

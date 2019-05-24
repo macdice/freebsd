@@ -545,12 +545,20 @@ retry:
 	return (0);
 }
 
+static void
+shm_path_info(void *data, char *buffer, size_t size)
+{
+	const char *path = (const char *) data;
+
+	strlcpy(buffer, path == NULL ? "(unlinked)" : path, size);
+}
+
 /*
  * shmfd object management including creation and reference counting
  * routines.
  */
 struct shmfd *
-shm_alloc(struct ucred *ucred, mode_t mode)
+shm_alloc(char *path, struct ucred *ucred, mode_t mode)
 {
 	struct shmfd *shmfd;
 
@@ -563,6 +571,10 @@ shm_alloc(struct ucred *ucred, mode_t mode)
 	    shmfd->shm_size, VM_PROT_DEFAULT, 0, ucred);
 	KASSERT(shmfd->shm_object != NULL, ("shm_create: vm_pager_allocate"));
 	shmfd->shm_object->pg_color = 0;
+	if (path != NULL) {
+		shmfd->shm_object->path_info_data = path;
+		shmfd->shm_object->path_info = shm_path_info;
+	}
 	VM_OBJECT_WLOCK(shmfd->shm_object);
 	vm_object_clear_flag(shmfd->shm_object, OBJ_ONEMAPPING);
 	vm_object_set_flag(shmfd->shm_object, OBJ_COLORED | OBJ_NOSPLIT);
@@ -693,6 +705,9 @@ shm_remove(char *path, Fnv32_t fnv, struct ucred *ucred)
 			if (error)
 				return (error);
 			map->sm_shmfd->shm_path = NULL;
+			VM_OBJECT_WLOCK(map->sm_shmfd->shm_object);
+			map->sm_shmfd->shm_object->path_info_data = NULL;
+			VM_OBJECT_WUNLOCK(map->sm_shmfd->shm_object);
 			LIST_REMOVE(map, sm_link);
 			shm_drop(map->sm_shmfd);
 			free(map->sm_path, M_SHMFD);
@@ -750,7 +765,7 @@ kern_shm_open(struct thread *td, const char *userpath, int flags, mode_t mode,
 			fdrop(fp, td);
 			return (EINVAL);
 		}
-		shmfd = shm_alloc(td->td_ucred, cmode);
+		shmfd = shm_alloc(NULL, td->td_ucred, cmode);
 	} else {
 		path = malloc(MAXPATHLEN, M_SHMFD, M_WAITOK);
 		pr_path = td->td_ucred->cr_prison->pr_path;
@@ -786,7 +801,7 @@ kern_shm_open(struct thread *td, const char *userpath, int flags, mode_t mode,
 				    path);
 				if (error == 0) {
 #endif
-					shmfd = shm_alloc(td->td_ucred, cmode);
+					shmfd = shm_alloc(path, td->td_ucred, cmode);
 					shm_insert(path, fnv, shmfd);
 #ifdef MAC
 				}

@@ -287,6 +287,8 @@ _vm_object_allocate(objtype_t type, vm_pindex_t size, vm_object_t object)
 	LIST_INIT(&object->rvq);
 #endif
 	umtx_shm_object_init(object);
+	object->path_info_data = NULL;
+	object->path_info = NULL;
 }
 
 /*

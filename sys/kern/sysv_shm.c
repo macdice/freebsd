@@ -685,6 +685,15 @@ shmget_existing(struct thread *td, struct shmget_args *uap, int mode,
 	return (0);
 }
 
+static void
+shmget_path_info(void *data, char *buffer, size_t size)
+{
+	key_t key = (key_t) data;
+
+	if (key != IPC_PRIVATE)
+		snprintf(buffer, size, "%ld", (key_t) data);
+}
+
 static int
 shmget_allocate_segment(struct thread *td, struct shmget_args *uap, int mode)
 {
@@ -752,6 +761,8 @@ shmget_allocate_segment(struct thread *td, struct shmget_args *uap, int mode)
 		return (ENOMEM);
 	}
 	shm_object->pg_color = 0;
+	shm_object->path_info_data = (void *) uap->key;
+	shm_object->path_info = shmget_path_info;
 	VM_OBJECT_WLOCK(shm_object);
 	vm_object_clear_flag(shm_object, OBJ_ONEMAPPING);
 	vm_object_set_flag(shm_object, OBJ_COLORED | OBJ_NOSPLIT);
