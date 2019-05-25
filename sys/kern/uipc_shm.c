@@ -549,8 +549,18 @@ static void
 shm_path_info(void *data, char *buffer, size_t size)
 {
 	const char *path = (const char *) data;
+	const char *pr_path = curthread->td_ucred->cr_prison->pr_path;
+	size_t pr_pathlen;
 
-	strlcpy(buffer, path == NULL ? "(unlinked)" : path, size);
+	if (path == NULL) {
+		strlcpy(buffer, "(unlinked)", size);
+	} else if (strcmp(pr_path, "/") == 0) {
+		strlcpy(buffer, path, size);
+	} else {
+		pr_pathlen = strlen(pr_path);
+		if (strncmp(path, pr_path, pr_pathlen) == 0)
+			strlcpy(buffer, path + pr_pathlen, size);
+	}
 }
 
 /*
