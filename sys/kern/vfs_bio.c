@@ -168,8 +168,6 @@ static void vfs_vmio_truncate(struct buf *bp, int npages);
 static void vfs_vmio_extend(struct buf *bp, int npages, int size);
 static int vfs_bio_clcheck(struct vnode *vp, int size,
 		daddr_t lblkno, daddr_t blkno);
-static void breada(struct vnode *, daddr_t *, int *, int, struct ucred *, int,
-		void (*)(struct buf *));
 static int buf_flush(struct vnode *vp, struct bufdomain *, int);
 static int flushbufqueues(struct vnode *, struct bufdomain *, int, int);
 static void buf_daemon(void);
@@ -2074,7 +2072,7 @@ bufkva_reclaim(vmem_t *vmem, int flags)
  * clear BIO_ERROR and B_INVAL prior to initiating I/O . If B_CACHE is set,
  * the buffer is valid and we do not have to do anything.
  */
-static void
+void
 breada(struct vnode * vp, daddr_t * rablkno, int * rabsize, int cnt,
     struct ucred * cred, int flags, void (*ckhashfunc)(struct buf *))
 {
