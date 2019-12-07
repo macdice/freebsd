@@ -530,6 +530,8 @@ void	bremfreef(struct buf *);	/* XXX Force bremfree, only for nfs. */
 		0, NULL, bpp)
 int	breadn_flags(struct vnode *, daddr_t, daddr_t, int, daddr_t *, int *, 
 	    int, struct ucred *, int, void (*)(struct buf *), struct buf **);
+void	breada(struct vnode *, daddr_t *, int *, int,
+	    struct ucred *, int, void (*)(struct buf *));
 void	bdwrite(struct buf *);
 void	bawrite(struct buf *);
 void	babarrierwrite(struct buf *);

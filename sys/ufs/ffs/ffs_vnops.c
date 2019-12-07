@@ -72,6 +72,7 @@ __FBSDID("$FreeBSD$");
 #include <sys/buf.h>
 #include <sys/conf.h>
 #include <sys/extattr.h>
+#include <sys/fcntl.h>
 #include <sys/kernel.h>
 #include <sys/limits.h>
 #include <sys/malloc.h>
@@ -109,6 +110,7 @@ __FBSDID("$FreeBSD$");
 extern int	ffs_rawread(struct vnode *vp, struct uio *uio, int *workdone);
 #endif
 static vop_fdatasync_t	ffs_fdatasync;
+static vop_advise_t	ffs_advise;
 static vop_fsync_t	ffs_fsync;
 static vop_getpages_t	ffs_getpages;
 static vop_getpages_async_t	ffs_getpages_async;
@@ -152,6 +154,7 @@ struct vop_vector ffs_fifoops1 = {
 /* Global vfs data structures for ufs. */
 struct vop_vector ffs_vnodeops2 = {
 	.vop_default =		&ufs_vnodeops,
+	.vop_advise =		ffs_advise,
 	.vop_fsync =		ffs_fsync,
 	.vop_fdatasync =	ffs_fdatasync,
 	.vop_getpages =		ffs_getpages,
@@ -184,6 +187,53 @@ struct vop_vector ffs_fifoops2 = {
 	.vop_setextattr =	ffs_setextattr,
 	.vop_vptofh =		ffs_vptofh,
 };
+
+/*
+ * Provide advice on future buffer usage.
+ */
+/* ARGSUSED */
+static int
+ffs_advise(struct vop_advise_args *ap)
+{
+	struct vnode *vp;
+	struct inode *ip;
+	struct fs *fs;
+	off_t end;
+	ufs_lbn_t lbn, lbn_end;
+	int error;
+
+	switch (ap->a_advice) {
+	case POSIX_FADV_WILLNEED:
+		vp = ap->a_vp;
+		ip = VTOI(vp);
+		fs = ITOFS(ip);
+
+		/*
+		 * Compute the range of blocks, but cap the number
+		 * arbitrarily, on the theory that larger reads will be
+		 * recognized as sequential anyway.
+		 */
+		end = min(ip->i_size, ap->a_end + 1);
+		lbn = lblkno(fs, ap->a_start);
+		lbn_end = min(lbn + 8, lblkno(fs, blkroundup(fs, end)));
+
+		/* Initiate the reads. */
+		while (lbn < lbn_end) {
+			int size = blksize(fs, ip, lbn);
+			breada(vp, &lbn, &size, 1, NOCRED, 0, NULL);
+			lbn++;
+		}
+
+		error = 0;
+		break;
+	default:
+		/* Defer to the standard advice handler. */
+		error = vop_stdadvise(ap);
+		break;
+	}
+
+	return (error);
+}
 
 /*
  * Synch an open file.
