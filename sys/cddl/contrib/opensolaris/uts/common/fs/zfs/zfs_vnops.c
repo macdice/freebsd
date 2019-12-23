@@ -628,6 +628,52 @@ mappedread(vnode_t *vp, int nbytes, uio_t *uio)
 	return (error);
 }
 
+static int
+zfs_advise(vnode_t *vp, size_t start, size_t end, int advice, cred_t *cr, caller_context_t *ct)
+{
+	znode_t		*zp = VTOZ(vp);
+	zfsvfs_t	*zfsvfs = zp->z_zfsvfs;
+	objset_t	*os = zp->z_zfsvfs->z_os;
+	int		error = 0;
+
+	if (end < start) {
+		error = EINVAL;
+		goto out;
+	} else if (end == start)
+		goto out;
+
+	ZFS_ENTER(zfsvfs);
+	ZFS_VERIFY_ZP(zp);
+
+	switch (advice)
+	{
+	case POSIX_FADV_WILLNEED:
+		/*
+		 * Pass on the caller's size directly, but note that dmu_prefetch_max
+		 * will effectively cap it.  If there really is a larger sequential
+		 * access pattern, perhaps dmu_zfetch will detect it.
+		 */
+		dmu_prefetch(os, zp->z_id, 0, start, end - start,
+			ZIO_PRIORITY_ASYNC_READ);
+		break;
+	case POSIX_FADV_NORMAL:
+	case POSIX_FADV_RANDOM:
+	case POSIX_FADV_SEQUENTIAL:
+	case POSIX_FADV_DONTNEED:
+	case POSIX_FADV_NOREUSE:
+		/* ignored for now */
+		break;
+	default:
+		error = EINVAL;
+		break;
+	}
+
+	ZFS_EXIT(zfsvfs);
+
+out:
+	return (error);
+}
+
 offset_t zfs_read_chunk_size = 1024 * 1024; /* Tunable */
 
 /*
@@ -4819,6 +4865,20 @@ ioflags(int ioflags)
 }
 
 static int
+zfs_freebsd_advise(ap)
+	struct vop_advise_args /* {
+		struct vnode *a_vp;
+		off_t start;
+		off_t end;
+		int advise;
+	} */ *ap;
+{
+
+	return (zfs_advise(ap->a_vp, ap->a_start, ap->a_end, ap->a_advice,
+	    NOCRED, NULL));
+}
+
+static int
 zfs_freebsd_read(ap)
 	struct vop_read_args /* {
 		struct vnode *a_vp;
@@ -5970,6 +6030,7 @@ struct vop_vector zfs_vnodeops = {
 	.vop_link =		zfs_freebsd_link,
 	.vop_symlink =		zfs_freebsd_symlink,
 	.vop_readlink =		zfs_freebsd_readlink,
+	.vop_advise =		zfs_freebsd_advise,
 	.vop_read =		zfs_freebsd_read,
 	.vop_write =		zfs_freebsd_write,
 	.vop_remove =		zfs_freebsd_remove,
