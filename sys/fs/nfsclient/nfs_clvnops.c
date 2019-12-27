@@ -143,6 +143,7 @@ static vop_advlockasync_t nfs_advlockasync;
 static vop_getacl_t nfs_getacl;
 static vop_setacl_t nfs_setacl;
 static vop_lock1_t	nfs_lock;
+static vop_advise_t	nfs_advise;
 
 /*
  * Global vfs data structures for nfs
@@ -151,6 +152,7 @@ static vop_lock1_t	nfs_lock;
 static struct vop_vector newnfs_vnodeops_nosig = {
 	.vop_default =		&default_vnodeops,
 	.vop_access =		nfs_access,
+	.vop_advise =		nfs_advise,
 	.vop_advlock =		nfs_advlock,
 	.vop_advlockasync =	nfs_advlockasync,
 	.vop_close =		nfs_close,
@@ -1408,6 +1410,43 @@ nfs_lookup(struct vop_lookup_args *ap)
 		    newvp->v_type != VDIR ? NULL : &dnfsva.na_ctime);
 	*vpp = newvp;
 	return (0);
+}
+
+/*
+ * nfs advise call.
+ */
+static int
+nfs_advise(struct vop_advise_args *ap)
+{
+	struct vnode *vp = ap->a_vp;
+	struct nfsnode *np = VTONFS(vp);
+	struct thread *td = curthread;
+	daddr_t lbn;
+	off_t end;
+	off_t size;
+	int biosize;
+	int n;
+	int error = 0;
+
+	switch (ap->a_advice) {
+	case POSIX_FADV_WILLNEED:
+		NFSLOCKNODE(np);
+		size = np->n_size;
+		NFSUNLOCKNODE(np);
+
+		biosize = vp->v_bufobj.bo_bsize;
+		end = min(size, ap->a_end + 1);
+		lbn = ap->a_start / biosize;
+		n = (roundup(end, biosize) / biosize) - lbn;
+		error = ncl_bioreadahead(vp, lbn, n, td, NOCRED);
+		break;
+	default:
+		/* Defer to the standard advice handler. */
+		vop_stdadvise(ap);
+		break;
+	}
+
+	return (error);
 }
 
 /*

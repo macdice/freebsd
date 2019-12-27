@@ -419,6 +419,45 @@ out:
 }
 
 /*
+ * Initiate asynchronous read ahead.
+ */
+int
+ncl_bioreadahead(struct vnode *vp, daddr_t lbn, int n, struct thread *td, struct ucred *cred)
+{
+	struct nfsmount *nmp = VFSTONFS(vp->v_mount);
+	struct buf *bp;
+	daddr_t rabn;
+	int error;
+
+	for (rabn = lbn; rabn < lbn + n; rabn++) {
+	    if (incore(&vp->v_bufobj, rabn) == NULL) {
+		bp = nfs_getcacheblk(vp, rabn, vp->v_bufobj.bo_bsize, td);
+		if (!bp) {
+		    error = newnfs_sigintr(nmp, td);
+		    return (error ? error : EINTR);
+		}
+		if ((bp->b_flags & (B_CACHE|B_DELWRI)) == 0) {
+		    bp->b_flags |= B_ASYNC;
+		    bp->b_iocmd = BIO_READ;
+		    vfs_busy_pages(bp, 0);
+		    printf("prefetch block %d\n", (int) rabn);
+		    if (ncl_asyncio(nmp, bp, cred, td)) {
+			bp->b_flags |= B_INVAL;
+			bp->b_ioflags |= BIO_ERROR;
+			vfs_unbusy_pages(bp);
+			brelse(bp);
+			break;
+		    }
+		} else {
+		    brelse(bp);
+		}
+	    }
+	}
+
+	return (0);
+}
+
+/*
  * Vnode op for read using bio
  */
 int
@@ -429,7 +468,7 @@ ncl_bioread(struct vnode *vp, struct uio *uio, int ioflag, struct ucred *cred)
 	struct buf *bp, *rabp;
 	struct thread *td;
 	struct nfsmount *nmp = VFSTONFS(vp->v_mount);
-	daddr_t lbn, rabn;
+	daddr_t lbn;
 	int bcount;
 	int seqcount;
 	int nra, error = 0, n = 0, on = 0;
@@ -488,6 +527,14 @@ ncl_bioread(struct vnode *vp, struct uio *uio, int ioflag, struct ucred *cred)
 		 * Start the read ahead(s), as required.
 		 */
 		if (nmp->nm_readahead > 0) {
+		    /* read seqcount blocks, but not past the end */
+		    nra = min(seqcount, (nsize / biosize) - lbn + 1);
+		    if (nra >= 0) {
+			error = ncl_bioreadahead(vp, lbn + 1, nra, td, cred);
+			if (error)
+			    return (error);
+		    }
+		    /*
 		    for (nra = 0; nra < nmp->nm_readahead && nra < seqcount &&
 			(off_t)(lbn + 1 + nra) * biosize < nsize; nra++) {
 			rabn = lbn + 1 + nra;
@@ -513,6 +560,7 @@ ncl_bioread(struct vnode *vp, struct uio *uio, int ioflag, struct ucred *cred)
 			    }
 			}
 		    }
+			*/
 		}
 
 		/* Note that bcount is *not* DEV_BSIZE aligned. */

@@ -93,6 +93,7 @@ enum nfsiod_state {
  */
 int ncl_meta_setsize(struct vnode *, struct thread *, u_quad_t);
 void ncl_doio_directwrite(struct buf *);
+int ncl_bioreadahead(struct vnode *, daddr_t, int, struct thread *, struct ucred *);
 int ncl_bioread(struct vnode *, struct uio *, int, struct ucred *);
 int ncl_biowrite(struct vnode *, struct uio *, int, struct ucred *);
 int ncl_vinvalbuf(struct vnode *, int, struct thread *, int);
