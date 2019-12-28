@@ -419,6 +419,44 @@ out:
 }
 
 /*
+ * Initiate asynchronous read.
+ */
+int
+ncl_bioprefetch(struct vnode *vp, daddr_t lbn, int n, struct ucred *cred, struct thread *td)
+{
+	struct nfsmount *nmp = VFSTONFS(vp->v_mount);
+	struct buf *bp;
+	daddr_t rabn;
+	int error;
+
+	for (rabn = lbn; rabn < lbn + n; rabn++) {
+	    if (incore(&vp->v_bufobj, rabn) == NULL) {
+		bp = nfs_getcacheblk(vp, rabn, vp->v_bufobj.bo_bsize, td);
+		if (!bp) {
+		    error = newnfs_sigintr(nmp, td);
+		    return (error ? error : EINTR);
+		}
+		if ((bp->b_flags & (B_CACHE|B_DELWRI)) == 0) {
+		    bp->b_flags |= B_ASYNC;
+		    bp->b_iocmd = BIO_READ;
+		    vfs_busy_pages(bp, 0);
+		    if (ncl_asyncio(nmp, bp, cred, td)) {
+			bp->b_flags |= B_INVAL;
+			bp->b_ioflags |= BIO_ERROR;
+			vfs_unbusy_pages(bp);
+			brelse(bp);
+			break;
+		    }
+		} else {
+		    brelse(bp);
+		}
+	    }
+	}
+
+	return (0);
+}
+
+/*
  * Vnode op for read using bio
  */
 int
@@ -426,10 +464,10 @@ ncl_bioread(struct vnode *vp, struct uio *uio, int ioflag, struct ucred *cred)
 {
 	struct nfsnode *np = VTONFS(vp);
 	int biosize, i;
-	struct buf *bp, *rabp;
+	struct buf *bp;
 	struct thread *td;
 	struct nfsmount *nmp = VFSTONFS(vp->v_mount);
-	daddr_t lbn, rabn;
+	daddr_t lbn;
 	int bcount;
 	int seqcount;
 	int nra, error = 0, n = 0, on = 0;
@@ -488,30 +526,13 @@ ncl_bioread(struct vnode *vp, struct uio *uio, int ioflag, struct ucred *cred)
 		 * Start the read ahead(s), as required.
 		 */
 		if (nmp->nm_readahead > 0) {
-		    for (nra = 0; nra < nmp->nm_readahead && nra < seqcount &&
-			(off_t)(lbn + 1 + nra) * biosize < nsize; nra++) {
-			rabn = lbn + 1 + nra;
-			if (incore(&vp->v_bufobj, rabn) == NULL) {
-			    rabp = nfs_getcacheblk(vp, rabn, biosize, td);
-			    if (!rabp) {
-				error = newnfs_sigintr(nmp, td);
-				return (error ? error : EINTR);
-			    }
-			    if ((rabp->b_flags & (B_CACHE|B_DELWRI)) == 0) {
-				rabp->b_flags |= B_ASYNC;
-				rabp->b_iocmd = BIO_READ;
-				vfs_busy_pages(rabp, 0);
-				if (ncl_asyncio(nmp, rabp, cred, td)) {
-				    rabp->b_flags |= B_INVAL;
-				    rabp->b_ioflags |= BIO_ERROR;
-				    vfs_unbusy_pages(rabp);
-				    brelse(rabp);
-				    break;
-				}
-			    } else {
-				brelse(rabp);
-			    }
-			}
+		    /* read seqcount blocks, but not past the end */
+		    nra = min(seqcount,
+			     (roundup(nsize - 1, biosize) / biosize) - lbn + 1);
+		    if (nra > 0) {
+			error = ncl_bioprefetch(vp, lbn + 1, nra, cred, td);
+			if (error)
+			    return (error);
 		    }
 		}
 
@@ -533,7 +554,6 @@ ncl_bioread(struct vnode *vp, struct uio *uio, int ioflag, struct ucred *cred)
 		 * If B_CACHE is not set, we must issue the read.  If this
 		 * fails, we return an error.
 		 */
-
 		if ((bp->b_flags & B_CACHE) == 0) {
 		    bp->b_iocmd = BIO_READ;
 		    vfs_busy_pages(bp, 0);
@@ -657,25 +677,8 @@ ncl_bioread(struct vnode *vp, struct uio *uio, int ioflag, struct ucred *cred)
 		if (nmp->nm_readahead > 0 &&
 		    (bp->b_flags & B_INVAL) == 0 &&
 		    (np->n_direofoffset == 0 ||
-		    (lbn + 1) * NFS_DIRBLKSIZ < np->n_direofoffset) &&
-		    incore(&vp->v_bufobj, lbn + 1) == NULL) {
-			rabp = nfs_getcacheblk(vp, lbn + 1, NFS_DIRBLKSIZ, td);
-			if (rabp) {
-			    if ((rabp->b_flags & (B_CACHE|B_DELWRI)) == 0) {
-				rabp->b_flags |= B_ASYNC;
-				rabp->b_iocmd = BIO_READ;
-				vfs_busy_pages(rabp, 0);
-				if (ncl_asyncio(nmp, rabp, cred, td)) {
-				    rabp->b_flags |= B_INVAL;
-				    rabp->b_ioflags |= BIO_ERROR;
-				    vfs_unbusy_pages(rabp);
-				    brelse(rabp);
-				}
-			    } else {
-				brelse(rabp);
-			    }
-			}
-		}
+		    (lbn + 1) * NFS_DIRBLKSIZ < np->n_direofoffset))
+			ncl_bioprefetch(vp, lbn + 1, 1, cred, td);
 		/*
 		 * Unlike VREG files, whos buffer size ( bp->b_bcount ) is
 		 * chopped for the EOF condition, we cannot tell how large
