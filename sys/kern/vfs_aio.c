@@ -2121,25 +2121,26 @@ aio_lio_merge(struct aiocb **acb_list, int nent)
 {
 	int i;
 
-	for (i = 0; i < (nent - 1); ++i) {
+	/* Looking for adjacent requests that can be merged. */
+	for (i = 1; i < nent; ++i) {
 		struct aiocb *acb;
-		struct aiocb *next;
+		struct aiocb *prev;
 
-		acb = uacb_list[i];
-		next = uacb_list[i + 1];
-		if (acb->aio_fildes != next->aio_fildes)
-			continue;
-		if (acb->aio_reqprio != next->aio_refprio
-			continue;
-		if (acb->aio_lio_opcode != next->aio_opcode)
-			continue;
-		if (acb->aio_offset + cb->aio_nbytes != next->aio_offset)
-			continue;
+		acb = acb_list[i];
+		prev = acb_list[i - 1];
+		if (prev->aio_fildes != acb->aio_fildes ||
+		    prev->aio_reqprio != acb->aio_refprio ||
+		    prev->aio_lio_opcode != acb->aio_opcode ||
+		    prev->aio_offset + prev->aio_nbytes != acb->aio_offset)
+		    prev->reqprio = 0;	/* no merge possible */
+		else
+		    prev->reqprio = 1;	/* prev can be merged with this req */
 
-		/* Mark this entry as able to be merged with the next. */
-		cb->reqprio = 1;
-		printf("can merge entry %d\n", i);
+		printf("can merge entry %d with prev? %d\n", i, prev->reqprio);
 	}
+
+	/* Final entry cannot be merged. */
+	acb_list[nent - 1]->aio_reqprio = 0;
 }
 
 static int
