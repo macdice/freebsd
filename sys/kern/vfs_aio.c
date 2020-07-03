@@ -2116,6 +2116,32 @@ sys_aio_mlock(struct thread *td, struct aio_mlock_args *uap)
 	return (aio_aqueue(td, uap->aiocbp, NULL, LIO_MLOCK, &aiocb_ops));
 }
 
+static void
+aio_lio_merge(struct aiocb **acb_list, int nent)
+{
+	int i;
+
+	for (i = 0; i < (nent - 1); ++i) {
+		struct aiocb *acb;
+		struct aiocb *next;
+
+		acb = uacb_list[i];
+		next = uacb_list[i + 1];
+		if (acb->aio_fildes != next->aio_fildes)
+			continue;
+		if (acb->aio_reqprio != next->aio_refprio
+			continue;
+		if (acb->aio_lio_opcode != next->aio_opcode)
+			continue;
+		if (acb->aio_offset + cb->aio_nbytes != next->aio_offset)
+			continue;
+
+		/* Mark this entry as able to be merged with the next. */
+		cb->reqprio = 1;
+		printf("can merge entry %d\n", i);
+	}
+}
+
 static int
 kern_lio_listio(struct thread *td, int mode, struct aiocb * const *uacb_list,
     struct aiocb **acb_list, int nent, struct sigevent *sig,
@@ -2194,6 +2220,12 @@ kern_lio_listio(struct thread *td, int mode, struct aiocb * const *uacb_list,
 	 */
 	lj->lioj_count = 1;
 	AIO_UNLOCK(ki);
+
+	/*
+	 * See if any of the operations can be merged into a
+	 * larger request.
+	 */
+	aio_lio_merge(act_list, nent);
 
 	/*
 	 * Get pointers to the list of I/O requests.
