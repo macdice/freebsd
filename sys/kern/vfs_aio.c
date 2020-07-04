@@ -317,6 +317,8 @@ static void	aio_schedule_fsync(void *context, int pending);
 static int	aio_newproc(int *);
 int		aio_aqueue(struct thread *td, struct aiocb *ujob,
 		    struct aioliojob *lio, int type, struct aiocb_ops *ops);
+static int	aio_kaqueue(struct thread *td, struct kaiocb *job,
+		    struct aioliojob *lj, int type, struct aiocb_ops *ops)
 static int	aio_queue_file(struct file *fp, struct kaiocb *job);
 static void	aio_biowakeup(struct bio *bp);
 static void	aio_proc_rundown(void *arg, struct proc *p);
@@ -1474,7 +1476,7 @@ aio_kaqueue(struct thread *td, struct kaiocb *job, struct aioliojob *lj,
 {
 	struct proc *p = td->td_proc;
 	struct file *fp;
-	struct kaiocb *job;
+	struct kaiocb *ujob;
 	struct kaioinfo *ki;
 	struct kevent kev;
 	int opcode;
@@ -1488,6 +1490,7 @@ aio_kaqueue(struct thread *td, struct kaiocb *job, struct aioliojob *lj,
 
 	ki = p->p_aioinfo;
 
+	ujob = job->ujob;
 	ops->store_status(ujob, -1);
 	ops->store_error(ujob, 0);
 	ops->store_kernelinfo(ujob, -1);
