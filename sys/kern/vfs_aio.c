@@ -318,7 +318,7 @@ static int	aio_newproc(int *);
 int		aio_aqueue(struct thread *td, struct aiocb *ujob,
 		    struct aioliojob *lio, int type, struct aiocb_ops *ops);
 static int	aio_kaqueue(struct thread *td, struct kaiocb *job,
-		    struct aioliojob *lj, int type, struct aiocb_ops *ops)
+		    struct aioliojob *lj, int type, struct aiocb_ops *ops);
 static int	aio_queue_file(struct file *fp, struct kaiocb *job);
 static void	aio_biowakeup(struct bio *bp);
 static void	aio_proc_rundown(void *arg, struct proc *p);
@@ -1450,8 +1450,15 @@ int
 aio_aqueue(struct thread *td, struct aiocb *ujob, struct aioliojob *lj,
     int type, struct aiocb_ops *ops)
 {
+	struct proc *p = td->td_proc;
+	struct kaioinfo *ki;
 	struct kaiocb *job;
 	int error;
+
+	if (p->p_aioinfo == NULL)
+		aio_init_aioinfo(p);
+
+	ki = p->p_aioinfo;
 
 	/* Allocate and initialize a single kaiocb and copy the user aiocb. */
 	job = uma_zalloc(aiocb_zone, M_WAITOK | M_ZERO);
@@ -1475,9 +1482,9 @@ aio_kaqueue(struct thread *td, struct kaiocb *job, struct aioliojob *lj,
     int type, struct aiocb_ops *ops)
 {
 	struct proc *p = td->td_proc;
-	struct file *fp;
-	struct kaiocb *ujob;
 	struct kaioinfo *ki;
+	struct file *fp;
+	struct aiocb *ujob;
 	struct kevent kev;
 	int opcode;
 	int error;
@@ -1485,12 +1492,9 @@ aio_kaqueue(struct thread *td, struct kaiocb *job, struct aioliojob *lj,
 	int jid;
 	u_short evflags;
 
-	if (p->p_aioinfo == NULL)
-		aio_init_aioinfo(p);
-
 	ki = p->p_aioinfo;
-
 	ujob = job->ujob;
+
 	ops->store_status(ujob, -1);
 	ops->store_error(ujob, 0);
 	ops->store_kernelinfo(ujob, -1);
@@ -2136,7 +2140,7 @@ sys_aio_mlock(struct thread *td, struct aio_mlock_args *uap)
 static void
 aio_lio_merge(struct kaiocb **kacb_list, int nent)
 {
-	size_t merged_size;
+	size_t cumulative_size;
 	int i;
 
 	/* Look for adjacent requests that could be merged. */
@@ -2152,6 +2156,8 @@ aio_lio_merge(struct kaiocb **kacb_list, int nent)
 		    prev->aio_fildes != acb->aio_fildes ||
 		    prev->aio_reqprio != acb->aio_reqprio ||
 		    prev->aio_lio_opcode != acb->aio_lio_opcode ||
+		    (acb->aio_lio_opcode != LIO_READ &&
+		        act->aio_lio_opcode != LIO_WRITE) ||
 		    prev->aio_offset + prev->aio_nbytes != acb->aio_offset ||
 		    cumulative_size + acb->aio_nbytes > IOSIZE_MAX)
 		{
