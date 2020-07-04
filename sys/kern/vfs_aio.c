@@ -2129,14 +2129,14 @@ aio_lio_merge(struct aiocb **acb_list, int nent)
 		acb = acb_list[i];
 		prev = acb_list[i - 1];
 		if (prev->aio_fildes != acb->aio_fildes ||
-		    prev->aio_reqprio != acb->aio_refprio ||
-		    prev->aio_lio_opcode != acb->aio_opcode ||
+		    prev->aio_reqprio != acb->aio_reqprio ||
+		    prev->aio_lio_opcode != acb->aio_lio_opcode ||
 		    prev->aio_offset + prev->aio_nbytes != acb->aio_offset)
-		    prev->reqprio = 0;	/* no merge possible */
+		    prev->aio_reqprio = 0;	/* no merge possible */
 		else
-		    prev->reqprio = 1;	/* prev can be merged with this req */
+		    prev->aio_reqprio = 1;	/* prev can be merged with this req */
 
-		printf("can merge entry %d with prev? %d\n", i, prev->reqprio);
+		printf("can merge entry %d with prev? %d\n", i, prev->aio_reqprio);
 	}
 
 	/* Final entry cannot be merged. */
@@ -2226,7 +2226,7 @@ kern_lio_listio(struct thread *td, int mode, struct aiocb * const *uacb_list,
 	 * See if any of the operations can be merged into a
 	 * larger request.
 	 */
-	aio_lio_merge(act_list, nent);
+	aio_lio_merge(acb_list, nent);
 
 	/*
 	 * Get pointers to the list of I/O requests.
