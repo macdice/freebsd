@@ -803,7 +803,6 @@ aio_process_rw(struct kaiocb *job)
 	struct uio auio;
 	struct iovec aiov;
 	struct iovec *aiov_merged;
-	struct kiocb *kaiocb;
 	int iovcnt;
 	ssize_t cnt;
 	long msgsnd_st, msgsnd_end;
