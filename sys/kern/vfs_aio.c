@@ -836,7 +836,7 @@ aio_process_rw(struct kaiocb *job)
 		auio.uio_iovcnt = 1;
 	} else {
 		/* We need an array of iovecs. */
-		aiov_merged = malloc(sizeof(struct iovec) * iov_len,
+		aiov_merged = malloc(sizeof(struct iovec) * iovcnt,
 		    M_LIO, M_WAITOK);
 		aio_fill_iovecs(aiov_merged, job);
 		auio.uio_iov = aiov_merged;
@@ -870,6 +870,7 @@ aio_process_rw(struct kaiocb *job)
 		auio.uio_rw = UIO_WRITE;
 		error = fo_write(fp, &auio, fp->f_cred, FOF_OFFSET, td);
 	}
+
 	if (iovcnt > 1)
 		free(aiov_merged, M_LIO);
 
