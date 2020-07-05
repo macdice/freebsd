@@ -812,8 +812,8 @@ aio_process_rw(struct kaiocb *job)
 	long inblock_st, inblock_end;
 	int error;
 
-	KASSERT((job->jobflags & KAIO_MERGED) == 0,
-	    "aio_process_rw scheduled for non-head node of merged chain");
+	KASSERT((job->jobflags & KAIOCB_MERGED) == 0,
+	    ("aio_process_rw scheduled for non-head node of merged chain"));
 
 	KASSERT(job->uaiocb.aio_lio_opcode == LIO_READ ||
 	    job->uaiocb.aio_lio_opcode == LIO_WRITE,
@@ -1788,7 +1788,7 @@ aio_queue_file(struct file *fp, struct kaiocb *job)
 	 * If this job is part of a merged chain, it has been combined with the
 	 * head I/O so we can skip it.
 	 */
-	if (job->flags & KAIOCB_MERGED)
+	if (job->jobflags & KAIOCB_MERGED)
 		return (0);
 
 	ki = job->userproc->p_aioinfo;
