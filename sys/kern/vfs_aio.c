@@ -827,6 +827,7 @@ aio_process_rw(struct kaiocb *job)
 	fp = job->fd_file;
 
 	iovcnt = aio_merged_chain_length(job);
+	printf("aio_process_rw chain length %d\n", iovcnt);
 	if (iovcnt == 1) {
 		/* Simple case, use a stack iovec. */
 		aiov.iov_base = (void *)(uintptr_t)cb->aio_buf;
@@ -869,6 +870,9 @@ aio_process_rw(struct kaiocb *job)
 		auio.uio_rw = UIO_WRITE;
 		error = fo_write(fp, &auio, fp->f_cred, FOF_OFFSET, td);
 	}
+	if (iovcnt > 1)
+		free(aiov_merged, M_LIO);
+
 	msgrcv_end = td->td_ru.ru_msgrcv;
 	msgsnd_end = td->td_ru.ru_msgsnd;
 	inblock_end = td->td_ru.ru_inblock;
@@ -896,8 +900,6 @@ aio_process_rw(struct kaiocb *job)
 	else
 		aio_complete_unmerge(job, cnt, 0);
 
-	if (iovcnt > 1)
-		free(aiov_merged, M_LIO);
 }
 
 static void
