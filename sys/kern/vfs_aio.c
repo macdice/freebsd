@@ -2180,15 +2180,15 @@ aio_lio_merge(struct kaiocb **kacb_list, int nent)
 		printf("can merge entry %d with prev!\n", i);
 
 		/*
-		 * In a chain of merged kaio entries, all but the tail carry
-		 * a "merged" pointer to the next item, and all but the head
-		 * carry a KAIOCB_MERGED flag.  Existing fo_aio_queue
-		 * implementations that don't understand this can ignore them
-		 * and process all the entries normally, but implementations
-		 * that do can identify a head item and perform scatter/gather
-		 * I/O, and then ignore non-head items.
+		 * In a chain of merged kaio entries, all but the tail carry a
+		 * "merged" pointer to the next item, and all but the head
+		 * carry a KAIOCB_MERGED flag.   fo_aio_queue implementations
+		 * that don't understand this can ignore them and process all
+		 * entries without merging, but implementations that do can
+		 * identify a head item and perform scatter/gather I/O, and
+		 * then skip non-head items.
 		 */
-		kprev->merged = acb;
+		kprev->merged = kacb;
 		kacb->jobflags |= KAIOCB_MERGED;
 		cumulative_size += acb->aio_nbytes;
 	}
