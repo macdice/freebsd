@@ -2153,13 +2153,17 @@ aio_lio_merge(struct kaiocb **kacb_list, int nent)
 	/* Look for adjacent requests that could be merged. */
 	cumulative_size = kacb_list[0]->uaiocb.aio_nbytes;
 	for (i = 1; i < nent; ++i) {
+		struct kaiocb *kacb;
+		struct kaiocb *kprev;
 		struct aiocb *acb;
 		struct aiocb *prev;
 
-		acb = &kacb_list[i]->uaiocb;
-		prev = &kacb_list[i - 1]->uaiocb;
-		if (acb == NULL ||
-		    prev == NULL ||
+		kacb = kacb_list[i];
+		kprev = kacb_list[i - 1];
+		acb = &kacb->uaiocb;
+		prev = &kprev->uaiocb;
+		if (kacb == NULL ||
+		    kprev == NULL ||
 		    prev->aio_fildes != acb->aio_fildes ||
 		    prev->aio_reqprio != acb->aio_reqprio ||
 		    prev->aio_lio_opcode != acb->aio_lio_opcode ||
@@ -2168,6 +2172,7 @@ aio_lio_merge(struct kaiocb **kacb_list, int nent)
 		    prev->aio_offset + prev->aio_nbytes != acb->aio_offset ||
 		    cumulative_size + acb->aio_nbytes > IOSIZE_MAX)
 		{
+			/* No merging possible. */
 			cumulative_size = acb ? acb->aio_nbytes : 0;
 			continue;
 		}
@@ -2183,8 +2188,9 @@ aio_lio_merge(struct kaiocb **kacb_list, int nent)
 		 * that do can identify a head item and perform scatter/gather
 		 * I/O, and then ignore non-head items.
 		 */
-		prev->merged = acb;
-		acb->jobflags |= KAIOCB_MERGED;
+		kprev->merged = acb;
+		kacb->jobflags |= KAIOCB_MERGED;
+		cumulative_size += acb->aio_nbytes;
 	}
 }
 
