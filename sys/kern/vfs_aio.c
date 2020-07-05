@@ -766,6 +766,25 @@ aio_fill_iovecs(struct iovec *iovec, struct kaiocb *kaiocb)
 	}
 }
 
+static void
+aio_complete_unmerge(struct kaiocb *kaiocb, ssize_t result, int error)
+{
+	ssize_t one_result;
+
+	while (kaiocb) {
+		if (error == 0) {
+			/* Split up the result over the original requests. */
+			one_result = MIN(result, kaiocb->uaiocb.aio_nbytes);
+			aio_complete(kaiocb, one_result, 0);
+			result -= one_result;
+		} else {
+			/* Broadcast the error to the original requests. */
+			aio_complete(kaiocb, -1, error);
+		}
+		kaiocb = kaiocb->merged;
+	}
+}
+
 /*
  * The AIO processing activity for LIO_READ/LIO_WRITE.  This is the code that
  * does the I/O request for the non-bio version of the operations.  The normal
@@ -873,9 +892,9 @@ aio_process_rw(struct kaiocb *job)
 	cnt -= auio.uio_resid;
 	td->td_ucred = td_savedcred;
 	if (error)
-		aio_complete(job, -1, error);
+		aio_complete_unmerge(job, -1, error);
 	else
-		aio_complete(job, cnt, 0);
+		aio_complete_unmerge(job, cnt, 0);
 
 	if (iovcnt > 1)
 		free(aiov_merged, M_LIO);
