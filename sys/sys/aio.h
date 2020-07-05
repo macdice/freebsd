@@ -153,6 +153,7 @@ struct kaiocb {
 			int	backend4;
 		};
 	};
+	struct	kaiocb *merged;		/* (*) next entry in merged chain */
 };
 
 struct socket;
