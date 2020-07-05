@@ -742,6 +742,30 @@ drop:
 	return (error);
 }
 
+static int
+aio_merged_chain_length(struct kaiocb *kaiocb)
+{
+	int length = 0;
+
+	while (kaiocb) {
+		kaiocb = kaiocb->merged;
+		length++;
+	}
+
+	return (length);
+}
+
+static void
+aio_fill_iovecs(struct iovec *iovec, struct kaiocb *kaiocb)
+{
+	while (kaiocb) {
+		iovec->iov_base = (void *)(uintptr_t)kaiocb->uaiocb.aio_buf;
+		iovec->iov_len = kaiocb->uaiocb.aio_nbytes;
+		kaiocb = kaiocb->merged;
+		iovec++;
+	}
+}
+
 /*
  * The AIO processing activity for LIO_READ/LIO_WRITE.  This is the code that
  * does the I/O request for the non-bio version of the operations.  The normal
@@ -759,12 +783,18 @@ aio_process_rw(struct kaiocb *job)
 	struct file *fp;
 	struct uio auio;
 	struct iovec aiov;
+	struct iovec *aiov_merged;
+	struct kiocb *kaiocb;
+	int iovcnt;
 	ssize_t cnt;
 	long msgsnd_st, msgsnd_end;
 	long msgrcv_st, msgrcv_end;
 	long oublock_st, oublock_end;
 	long inblock_st, inblock_end;
 	int error;
+
+	KASSERT((job->jobflags & KAIO_MERGED) == 0,
+	    "aio_process_rw scheduled for non-head node of merged chain");
 
 	KASSERT(job->uaiocb.aio_lio_opcode == LIO_READ ||
 	    job->uaiocb.aio_lio_opcode == LIO_WRITE,
@@ -777,11 +807,22 @@ aio_process_rw(struct kaiocb *job)
 	cb = &job->uaiocb;
 	fp = job->fd_file;
 
-	aiov.iov_base = (void *)(uintptr_t)cb->aio_buf;
-	aiov.iov_len = cb->aio_nbytes;
+	iovcnt = aio_merged_chain_length(job);
+	if (iovcnt == 1) {
+		/* Simple case, use a stack iovec. */
+		aiov.iov_base = (void *)(uintptr_t)cb->aio_buf;
+		aiov.iov_len = cb->aio_nbytes;
+		auio.uio_iov = &aiov;
+		auio.uio_iovcnt = 1;
+	} else {
+		/* We need an array of iovecs. */
+		aiov_merged = malloc(sizeof(struct iovec) * iov_len,
+		    M_LIO, M_WAITOK);
+		aio_fill_iovecs(aiov_merged, job);
+		auio.uio_iov = aiov_merged;
+		auio.uio_iovcnt = iovcnt;
+	}
 
-	auio.uio_iov = &aiov;
-	auio.uio_iovcnt = 1;
 	auio.uio_offset = cb->aio_offset;
 	auio.uio_resid = cb->aio_nbytes;
 	cnt = cb->aio_nbytes;
@@ -835,6 +876,9 @@ aio_process_rw(struct kaiocb *job)
 		aio_complete(job, -1, error);
 	else
 		aio_complete(job, cnt, 0);
+
+	if (iovcnt > 1)
+		free(aiov_merged, M_LIO);
 }
 
 static void
@@ -1718,6 +1762,13 @@ aio_queue_file(struct file *fp, struct kaiocb *job)
 	struct mount *mp;
 	int error;
 	bool safe;
+
+	/*
+	 * If this job is part of a merged chain, it has been combined with the
+	 * head I/O so we can skip it.
+	 */
+	if (job->flags & KAIOCB_MERGED)
+		return (0);
 
 	ki = job->userproc->p_aioinfo;
 	error = aio_qbio(job->userproc, job);
