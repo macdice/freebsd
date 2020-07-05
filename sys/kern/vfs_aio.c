@@ -1460,15 +1460,17 @@ aio_aqueue(struct thread *td, struct aiocb *ujob, struct aioliojob *lj,
 
 	ki = p->p_aioinfo;
 
-	/* Allocate and initialize a single kaiocb and copy the user aiocb. */
+	/* Allocate and copy the user aiocb. */
 	job = uma_zalloc(aiocb_zone, M_WAITOK | M_ZERO);
-	knlist_init_mtx(&job->klist, AIO_MTX(ki));
 	error = ops->aio_copyin(ujob, &job->uaiocb);
 	if (error) {
 		ops->store_error(ujob, error);
 		uma_zfree(aiocb_zone, job);
 		return (error);
 	}
+
+	/* Save userspace address of the job info. */
+	job->ujob = ujob;
 
 	return (aio_kaqueue(td, job, lj, type, ops));
 }
@@ -1527,10 +1529,8 @@ aio_kaqueue(struct thread *td, struct kaiocb *job, struct aioliojob *lj,
 		return (EINVAL);
 	}
 
+	knlist_init_mtx(&job->klist, AIO_MTX(ki));
 	ksiginfo_init(&job->ksi);
-
-	/* Save userspace address of the job info. */
-	job->ujob = ujob;
 
 	/* Get the opcode. */
 	if (type != LIO_NOP)
@@ -1558,6 +1558,7 @@ aio_kaqueue(struct thread *td, struct kaiocb *job, struct aioliojob *lj,
 		break;
 	case LIO_MLOCK:
 		fp = NULL;
+		error = 0;
 		break;
 	case LIO_NOP:
 		error = fget(td, fd, &cap_no_rights, &fp);
@@ -2143,34 +2144,35 @@ aio_lio_merge(struct kaiocb **kacb_list, int nent)
 	size_t cumulative_size;
 	int i;
 
+	if (nent < 1)
+		return;
+
+	/* XXX sort? */
+
 	/* Look for adjacent requests that could be merged. */
-	cumulative_size = kacb_list[0]->uaicb.aio_nbytes;
+	cumulative_size = kacb_list[0]->uaiocb.aio_nbytes;
 	for (i = 1; i < nent; ++i) {
 		struct aiocb *acb;
 		struct aiocb *prev;
 
-		kacb = &kacb_list[i]->uaiocb;
+		acb = &kacb_list[i]->uaiocb;
 		prev = &kacb_list[i - 1]->uaiocb;
-		if (prev == NULL ||
-		    kacb == NULL ||
+		if (acb == NULL ||
+		    prev == NULL ||
 		    prev->aio_fildes != acb->aio_fildes ||
 		    prev->aio_reqprio != acb->aio_reqprio ||
 		    prev->aio_lio_opcode != acb->aio_lio_opcode ||
 		    (acb->aio_lio_opcode != LIO_READ &&
-		        act->aio_lio_opcode != LIO_WRITE) ||
+		     acb->aio_lio_opcode != LIO_WRITE) ||
 		    prev->aio_offset + prev->aio_nbytes != acb->aio_offset ||
 		    cumulative_size + acb->aio_nbytes > IOSIZE_MAX)
 		{
-			cumulative_size = kacb ? kacb->aio_nbytes : 0;
+			cumulative_size = acb ? acb->aio_nbytes : 0;
 			continue;
 		}
 
 		printf("can merge entry %d with prev!\n", i);
 	}
-
-	/* Final entry cannot be merged. */
-	if (acb_list[nent - 1] != NULL)
-	    acb_list[nent - 1]->aio_reqprio = 0;
 }
 
 static int
@@ -2179,9 +2181,10 @@ kern_lio_listio(struct thread *td, int mode, struct aiocb * const *uacb_list,
     struct aiocb_ops *ops)
 {
 	struct proc *p = td->td_proc;
+	struct aiocb *ujob;
 	struct kaiocb *job;
 	struct kaioinfo *ki;
-	struct kaio **kacb_list;
+	struct kaiocb **kacb_list;
 	struct aioliojob *lj;
 	struct kevent kev;
 	int error;
@@ -2258,21 +2261,22 @@ kern_lio_listio(struct thread *td, int mode, struct aiocb * const *uacb_list,
 	 * we can copy in all the user control blocks and look for
 	 * opportunities to merge them.
 	 */
+	nerror = 0;
 	kacb_list = malloc(sizeof(struct kaiocb *) * nent, M_LIO, M_WAITOK);
 	for (i = 0; i < nent; i++) {
 		ujob = acb_list[i];
 		if (ujob == NULL) {
 			job = NULL;
 		} else {
-			job = uma_zalloc(aiocb_zone, M_LIO, M_WAITOK | M_ZERO);
-			knlist_init_mtx(&job->klist, AIO_MTX(ki));
-			error = ops->aio_copyin(ujob, job->uaiocb);
+			job = uma_zalloc(aiocb_zone, M_WAITOK | M_ZERO);
+			error = ops->aio_copyin(ujob, &job->uaiocb);
 			if (error) {
 			    ops->store_error(ujob, error);
 			    uma_zfree(aiocb_zone, job);
 			    job = NULL;
 			    nerror++;
 			}
+			job->ujob = ujob;
 		}
 		kacb_list[i] = job;
 	}
@@ -2287,7 +2291,6 @@ kern_lio_listio(struct thread *td, int mode, struct aiocb * const *uacb_list,
 	 * Get pointers to the list of I/O requests.
 	 */
 	nagain = 0;
-	nerror = 0;
 	for (i = 0; i < nent; i++) {
 		job = kacb_list[i];
 		if (job != NULL) {
