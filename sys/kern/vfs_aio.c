@@ -1510,13 +1510,18 @@ static struct aiocb_ops aiocb_ops_osigevent = {
 #endif
 
 static int
-aio_init_kaiocb(struct kaiocb **job, struct aiocb *ujob, struct aiocb_ops *ops)
+aio_init_kaiocb(struct thread *td, struct kaiocb **jobp, struct aiocb *ujob, struct aiocb_ops *ops)
 {
+	struct proc *p = td->td_proc;
+	struct kaioinfo *ki;
+	struct kaiocb *job;
 	int error;
 
+	ki = p->p_aioinfo;
+
 	/* Allocate a kaiocb object in the kernel. */
-	*job = uma_zalloc(aiocb_zon, M_WAITOK | M_ZERO);
-	error = ops->aio_copyin(ujob, (*job)->uaiocb):
+	job = uma_zalloc(aiocb_zone, M_WAITOK | M_ZERO);
+	error = ops->aio_copyin(ujob, &job->uaiocb);
 	if (error) {
 		ops->store_error(ujob, error);
 		uma_zfree(aiocb_zone, job);
@@ -1524,7 +1529,7 @@ aio_init_kaiocb(struct kaiocb **job, struct aiocb *ujob, struct aiocb_ops *ops)
 	}
 
 	/* Save userspace address of the job info. */
-	(*job)->ujob = ujob;
+	job->ujob = ujob;
 
 	ops->store_status(ujob, -1);
 	ops->store_error(ujob, 0);
@@ -1554,6 +1559,8 @@ aio_init_kaiocb(struct kaiocb **job, struct aiocb *ujob, struct aiocb_ops *ops)
 	knlist_init_mtx(&job->klist, AIO_MTX(ki));
 	ksiginfo_init(&job->ksi);
 
+	*jobp = job;
+
 	return (0);
 }
 
@@ -1562,10 +1569,11 @@ aio_init_kaiocb(struct kaiocb **job, struct aiocb *ujob, struct aiocb_ops *ops)
  * store any errors, freeing and clearing affected entries.
  */
 static int
-aio_get_files(struct kaiocb **jobs, int nent)
+aio_get_files(struct thread *td, struct kaiocb **jobs, int nent,
+    struct aiocb_ops *ops)
 {
 	int fd = -1;
-	int op = -1;
+	int opcode = -1;
 	int error = 0;
 	bool failure = false;
 	struct file *fp = NULL;
@@ -1578,23 +1586,25 @@ aio_get_files(struct kaiocb **jobs, int nent)
 			continue;
 
 		/* Skip repeated lookups and checks for the same fd and op. */
-		if (job->uaiocb.aio_filedes == fd &&
-		    job->uaiocb.aio_lio_op == op) {
+		if (fd != -1 && opcode != -1 &&
+		    job->uaiocb.aio_lio_opcode != -1 &&
+		    job->uaiocb.aio_fildes == fd &&
+		    job->uaiocb.aio_lio_opcode == opcode) {
 			if (error == 0) {
-				/* Increment file reference count. */
-				fhold(last_fp);
-				job->fd_file = last_fp;
-			} else {
-				/* Copy previous error and free entry. */
-				uma_zfree(aiocb_zone, job);
-				ops->store_error(ujob, error);
-				jobs[i] = NULL;
+				/* Increment fp's refcount and store it. */
+				if (fhold(fp)) {
+					job->fd_file = fp;
+					continue;
+				}
+				/* Shouldn't be possible, already held. */
+				error = EBADF;
 			}
-			continue;
+			goto error_next;
 		}
 
-		/* Look up the file and perform permissions check. */
+		/* Look up the file and perform check rights. */
 		fd = job->uaiocb.aio_fildes;
+		opcode = job->uaiocb.aio_lio_opcode;
 		switch (opcode) {
 		case LIO_WRITE:
 			error = fget_write(td, fd, &cap_pwrite_rights, &fp);
@@ -1624,12 +1634,12 @@ aio_get_files(struct kaiocb **jobs, int nent)
 		    (fp->f_vnode == NULL || fp->f_vnode->v_type != VCHR))
 			error = EINVAL;
 
+error_next:
 		if (error) {
 			uma_zfree(aiocb_zone, job);
-			ops->store_error(ujob, error);
+			ops->store_error(job->ujob, error);
 			jobs[i] = NULL;
-			failue = true;
-			continue;
+			failure = true;
 		}
 	}
 
@@ -1657,7 +1667,7 @@ aio_aqueue(struct thread *td, struct aiocb *ujob, int type,
 
 	ki = p->p_aioinfo;
 
-	error = aio_init_kaiocb(&job, ujob);
+	error = aio_init_kaiocb(td, &job, ujob, ops);
 	if (error != 0)
 		return (error);
 
@@ -1668,7 +1678,7 @@ aio_aqueue(struct thread *td, struct aiocb *ujob, int type,
 	job->uaiocb.aio_lio_opcode = type;
 
 	/* Look up files and check permissions. */
-	error = aio_get_files(&job, 1);
+	error = aio_get_files(td, &job, 1, ops);
 	if (error != 0)
 		return (error);
 
@@ -1691,7 +1701,7 @@ aio_kaqueue(struct thread *td, struct kaiocb *job, struct aioliojob *lj,
 	struct kevent kev;
 	int opcode;
 	int error;
-	int fd, kqfd;
+	int kqfd;
 	int jid;
 	u_short evflags;
 
@@ -2412,21 +2422,18 @@ kern_lio_listio(struct thread *td, int mode, struct aiocb * const *uacb_list,
 		ujob = acb_list[i];
 		if (ujob == NULL) {
 			kacb_list[i] = NULL;
-		} if (aio_init_kaiocb(&kacb_list[i], ujob, ops) != 0)
+		} if (aio_init_kaiocb(td, &kacb_list[i], ujob, ops) != 0)
 			nerror++;
 		}
 	}
 
 	/* XXX: If we sort them by op, fd, offset here it might help */
 
-	/* Get all file objects. */
-	if (aio_get_files(kacb_list, nent, ops) != 0)
+	/* Look up all referenced file objects. */
+	if (aio_get_files(td, kacb_list, nent, ops) != 0)
 		nerror++;
 
-	/*
-	 * See if any of the operations can be merged into a
-	 * larger request.
-	 */
+	/* See if any of the I/O requests can be merged into a larger one. */
 	aio_lio_merge(kacb_list, nent);
 
 	/* Queue all I/O request. */
