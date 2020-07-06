@@ -317,9 +317,9 @@ static void	aio_process_mlock(struct kaiocb *job);
 static void	aio_schedule_fsync(void *context, int pending);
 static int	aio_newproc(int *);
 int		aio_aqueue(struct thread *td, struct aiocb *ujob,
-		    struct aioliojob *lio, int type, struct aiocb_ops *ops);
+		    int type, struct aiocb_ops *ops);
 static int	aio_kaqueue(struct thread *td, struct kaiocb *job,
-		    struct aioliojob *lj, int type, struct aiocb_ops *ops);
+		    struct aioliojob *lj, struct aiocb_ops *ops);
 static int	aio_queue_file(struct file *fp, struct kaiocb *job);
 static void	aio_biowakeup(struct bio *bp);
 static void	aio_proc_rundown(void *arg, struct proc *p);
@@ -1509,26 +1509,14 @@ static struct aiocb_ops aiocb_ops_osigevent = {
 };
 #endif
 
-/*
- * Queue a new simple AIO request.
- */
-int
-aio_aqueue(struct thread *td, struct aiocb *ujob, struct aioliojob *lj,
-    int type, struct aiocb_ops *ops)
+static int
+aio_init_kaiocb(struct kaiocb **job, struct aiocb *ujob, struct aiocb_ops *ops)
 {
-	struct proc *p = td->td_proc;
-	struct kaioinfo *ki;
-	struct kaiocb *job;
 	int error;
 
-	if (p->p_aioinfo == NULL)
-		aio_init_aioinfo(p);
-
-	ki = p->p_aioinfo;
-
-	/* Allocate and copy the user aiocb. */
-	job = uma_zalloc(aiocb_zone, M_WAITOK | M_ZERO);
-	error = ops->aio_copyin(ujob, &job->uaiocb);
+	/* Allocate a kaiocb object in the kernel. */
+	*job = uma_zalloc(aiocb_zon, M_WAITOK | M_ZERO);
+	error = ops->aio_copyin(ujob, (*job)->uaiocb):
 	if (error) {
 		ops->store_error(ujob, error);
 		uma_zfree(aiocb_zone, job);
@@ -1536,43 +1524,11 @@ aio_aqueue(struct thread *td, struct aiocb *ujob, struct aioliojob *lj,
 	}
 
 	/* Save userspace address of the job info. */
-	job->ujob = ujob;
-
-	return (aio_kaqueue(td, job, lj, type, ops));
-}
-
-/*
- * Queue a new AIO request.  Choosing either the threaded or direct bio VCHR
- * technique is done in this code.
- */
-static int
-aio_kaqueue(struct thread *td, struct kaiocb *job, struct aioliojob *lj,
-    int type, struct aiocb_ops *ops)
-{
-	struct proc *p = td->td_proc;
-	struct kaioinfo *ki;
-	struct file *fp;
-	struct aiocb *ujob;
-	struct kevent kev;
-	int opcode;
-	int error;
-	int fd, kqfd;
-	int jid;
-	u_short evflags;
-
-	ki = p->p_aioinfo;
-	ujob = job->ujob;
+	(*job)->ujob = ujob;
 
 	ops->store_status(ujob, -1);
 	ops->store_error(ujob, 0);
 	ops->store_kernelinfo(ujob, -1);
-
-	if (num_queue_count >= max_queue_count ||
-	    ki->kaio_count >= max_aio_queue_per_proc) {
-		ops->store_error(ujob, EAGAIN);
-		uma_zfree(aiocb_zone, job);
-		return (EAGAIN);
-	}
 
 	if (job->uaiocb.aio_nbytes > IOSIZE_MAX) {
 		uma_zfree(aiocb_zone, job);
@@ -1598,45 +1554,162 @@ aio_kaqueue(struct thread *td, struct kaiocb *job, struct aioliojob *lj,
 	knlist_init_mtx(&job->klist, AIO_MTX(ki));
 	ksiginfo_init(&job->ksi);
 
-	/* Get the opcode. */
-	if (type != LIO_NOP)
-		job->uaiocb.aio_lio_opcode = type;
-	opcode = job->uaiocb.aio_lio_opcode;
+
+}
+
+/*
+ * Get the file objects for a list of kaiocb entries.  Check permissions and
+ * report any errors, freeing entries that are no longer needed.
+ */
+static int
+aio_get_files(struct kaiocb **jobs, int nent)
+{
+	int fd = -1;
+	int op = -1;
+	int error = 0;
+	bool failure = false;
+	struct file *fp = NULL;
+	struct kaiocb *job;
+	int i;
+
+	for (i = 0; i < nent; ++i) {
+		job = jobs[i];
+		if (job == NULL)
+			continue;
+
+		/* Skip repeated lookups and checks for the same fd and op. */
+		if (job->uaiocb.aio_filedes == fd &&
+		    job->uaiocb.aio_lio_op == op) {
+			if (error == 0) {
+				/* Increment referent count on file. */
+				fhold(last_fp);
+				job->fd_file = last_fp;
+			} else {
+				/* Copy previous error and free entry. */
+				uma_zfree(aiocb_zone, job);
+				ops->store_error(ujob, error);
+				jobs[i] = NULL;
+			}
+			continue;
+		}
+
+		/* Look up the file and peform permissions check. */
+		fd = job->uaiocb.aio_fildes;
+		switch (opcode) {
+		case LIO_WRITE:
+			error = fget_write(td, fd, &cap_pwrite_rights, &fp);
+			break;
+		case LIO_READ:
+			error = fget_read(td, fd, &cap_pread_rights, &fp);
+			break;
+		case LIO_SYNC:
+			error = fget(td, fd, &cap_fsync_rights, &fp);
+			if (error == 0 && fp == NULL)
+				error = EINVAL;
+			break;
+		case LIO_MLOCK:
+			fp = NULL;
+			error = 0;
+			break;
+		case LIO_NOP:
+			error = fget(td, fd, &cap_no_rights, &fp);
+			break;
+		default:
+			error = EINVAL;
+		}
+
+		if (error == 0 &&
+		    (opcode == LIO_READ || opcode == LIO_WRITE) &&
+		    job->uaiocb.aio_offset < 0 &&
+		    (fp->f_vnode == NULL || fp->f_vnode->v_type != VCHR))
+			error = EINVAL;
+
+		if (error) {
+			uma_zfree(aiocb_zone, job);
+			ops->store_error(ujob, error);
+			jobs[i] = NULL;
+			failue = true;
+			continue;
+		}
+
+	}
 
 	/*
-	 * Validate the opcode and fetch the file object for the specified
-	 * file descriptor.
-	 *
-	 * XXXRW: Moved the opcode validation up here so that we don't
-	 * retrieve a file descriptor without knowing what the capabiltity
-	 * should be.
+	 * Return the last error, if there was only one entry.  Otherwise,
+	 * return EIO if any entry failed.
 	 */
-	fd = job->uaiocb.aio_fildes;
-	switch (opcode) {
-	case LIO_WRITE:
-		error = fget_write(td, fd, &cap_pwrite_rights, &fp);
-		break;
-	case LIO_READ:
-		error = fget_read(td, fd, &cap_pread_rights, &fp);
-		break;
-	case LIO_SYNC:
-		error = fget(td, fd, &cap_fsync_rights, &fp);
-		break;
-	case LIO_MLOCK:
-		fp = NULL;
-		error = 0;
-		break;
-	case LIO_NOP:
-		error = fget(td, fd, &cap_no_rights, &fp);
-		break;
-	default:
-		error = EINVAL;
-	}
-	if (error) {
-		uma_zfree(aiocb_zone, job);
-		ops->store_error(ujob, error);
+	return (nent == 1 ? error : (failure ? EIO : 0));
+}
+
+/*
+ * Queue a new simple AIO request.
+ */
+int
+aio_aqueue(struct thread *td, struct aiocb *ujob, int type,
+    struct aiocb_ops *ops)
+{
+	struct proc *p = td->td_proc;
+	struct kaioinfo *ki;
+	struct kaiocb *job;
+	int error;
+
+	if (p->p_aioinfo == NULL)
+		aio_init_aioinfo(p);
+
+	ki = p->p_aioinfo;
+
+	error = aio_init_kaiocb(&job, ujob);
+	if (error != 0)
 		return (error);
+
+	/*
+	 * For non-listio requests, we overwrite the opcode from the user aiocb
+	 * struct with the one corresponding to the syscall.
+	 */
+	job->uaiocb.aio_lio_opcode = type;
+
+	/* Look up files and check permissions. */
+	error = aio_get_files(&job, 1);
+	if (error != 0)
+		return (error);
+
+	error = aio_kaqueue(td, job, NULL, ops);
+	return (error);
+}
+
+/*
+ * Queue a new AIO request.  Choosing either the threaded or direct bio VCHR
+ * technique is done in this code.
+ */
+static int
+aio_kaqueue(struct thread *td, struct kaiocb *job, struct aioliojob *lj,
+    struct aiocb_ops *ops)
+{
+	struct proc *p = td->td_proc;
+	struct kaioinfo *ki;
+	struct file *fp;
+	struct aiocb *ujob;
+	struct kevent kev;
+	int opcode;
+	int error;
+	int fd, kqfd;
+	int jid;
+	u_short evflags;
+
+	ki = p->p_aioinfo;
+	ujob = job->ujob;
+
+	if (num_queue_count >= max_queue_count ||
+	    ki->kaio_count >= max_aio_queue_per_proc) {
+		ops->store_error(ujob, EAGAIN);
+		uma_zfree(aiocb_zone, job);
+		return (EAGAIN);
 	}
+
+
+	/* Get the opcode. */
+	opcode = job->uaiocb.aio_lio_opcode;
+
 
 	if (opcode == LIO_SYNC && fp->f_vnode == NULL) {
 		error = EINVAL;
@@ -2174,7 +2247,7 @@ int
 freebsd6_aio_read(struct thread *td, struct freebsd6_aio_read_args *uap)
 {
 
-	return (aio_aqueue(td, (struct aiocb *)uap->aiocbp, NULL, LIO_READ,
+	return (aio_aqueue(td, (struct aiocb *)uap->aiocbp, LIO_READ,
 	    &aiocb_ops_osigevent));
 }
 #endif
@@ -2183,7 +2256,7 @@ int
 sys_aio_read(struct thread *td, struct aio_read_args *uap)
 {
 
-	return (aio_aqueue(td, uap->aiocbp, NULL, LIO_READ, &aiocb_ops));
+	return (aio_aqueue(td, uap->aiocbp, LIO_READ, &aiocb_ops));
 }
 
 /* syscall - asynchronous write to a file (REALTIME) */
@@ -2192,7 +2265,7 @@ int
 freebsd6_aio_write(struct thread *td, struct freebsd6_aio_write_args *uap)
 {
 
-	return (aio_aqueue(td, (struct aiocb *)uap->aiocbp, NULL, LIO_WRITE,
+	return (aio_aqueue(td, (struct aiocb *)uap->aiocbp, LIO_WRITE,
 	    &aiocb_ops_osigevent));
 }
 #endif
@@ -2201,14 +2274,14 @@ int
 sys_aio_write(struct thread *td, struct aio_write_args *uap)
 {
 
-	return (aio_aqueue(td, uap->aiocbp, NULL, LIO_WRITE, &aiocb_ops));
+	return (aio_aqueue(td, uap->aiocbp, LIO_WRITE, &aiocb_ops));
 }
 
 int
 sys_aio_mlock(struct thread *td, struct aio_mlock_args *uap)
 {
 
-	return (aio_aqueue(td, uap->aiocbp, NULL, LIO_MLOCK, &aiocb_ops));
+	return (aio_aqueue(td, uap->aiocbp, LIO_MLOCK, &aiocb_ops));
 }
 
 static void
@@ -2244,7 +2317,7 @@ aio_lio_merge(struct kaiocb **kacb_list, int nent)
 		    prev->aio_offset + prev->aio_nbytes != acb->aio_offset ||
 		    cumulative_size + acb->aio_nbytes > IOSIZE_MAX)
 		{
-			/* No merging possible. */
+			/* No merging possible.  Reset cumulative size. */
 			cumulative_size = acb ? acb->aio_nbytes : 0;
 			continue;
 		}
@@ -2654,7 +2727,7 @@ kern_aio_fsync(struct thread *td, int op, struct aiocb *ujob,
 
 	if (op != O_SYNC) /* XXX lack of O_DSYNC */
 		return (EINVAL);
-	return (aio_aqueue(td, ujob, NULL, LIO_SYNC, ops));
+	return (aio_aqueue(td, ujob, LIO_SYNC, ops));
 }
 
 int
@@ -3004,7 +3077,7 @@ freebsd6_freebsd32_aio_read(struct thread *td,
     struct freebsd6_freebsd32_aio_read_args *uap)
 {
 
-	return (aio_aqueue(td, (struct aiocb *)uap->aiocbp, NULL, LIO_READ,
+	return (aio_aqueue(td, (struct aiocb *)uap->aiocbp, LIO_READ,
 	    &aiocb32_ops_osigevent));
 }
 #endif
@@ -3013,7 +3086,7 @@ int
 freebsd32_aio_read(struct thread *td, struct freebsd32_aio_read_args *uap)
 {
 
-	return (aio_aqueue(td, (struct aiocb *)uap->aiocbp, NULL, LIO_READ,
+	return (aio_aqueue(td, (struct aiocb *)uap->aiocbp, LIO_READ,
 	    &aiocb32_ops));
 }
 
@@ -3023,7 +3096,7 @@ freebsd6_freebsd32_aio_write(struct thread *td,
     struct freebsd6_freebsd32_aio_write_args *uap)
 {
 
-	return (aio_aqueue(td, (struct aiocb *)uap->aiocbp, NULL, LIO_WRITE,
+	return (aio_aqueue(td, (struct aiocb *)uap->aiocbp, LIO_WRITE,
 	    &aiocb32_ops_osigevent));
 }
 #endif
@@ -3032,7 +3105,7 @@ int
 freebsd32_aio_write(struct thread *td, struct freebsd32_aio_write_args *uap)
 {
 
-	return (aio_aqueue(td, (struct aiocb *)uap->aiocbp, NULL, LIO_WRITE,
+	return (aio_aqueue(td, (struct aiocb *)uap->aiocbp, LIO_WRITE,
 	    &aiocb32_ops));
 }
 
@@ -3040,7 +3113,7 @@ int
 freebsd32_aio_mlock(struct thread *td, struct freebsd32_aio_mlock_args *uap)
 {
 
-	return (aio_aqueue(td, (struct aiocb *)uap->aiocbp, NULL, LIO_MLOCK,
+	return (aio_aqueue(td, (struct aiocb *)uap->aiocbp, LIO_MLOCK,
 	    &aiocb32_ops));
 }
 
