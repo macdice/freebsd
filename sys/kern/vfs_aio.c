@@ -761,8 +761,8 @@ aio_fill_iovecs(struct iovec *iovec, struct kaiocb *kaiocb)
 	while (kaiocb) {
 		iovec->iov_base = (void *)(uintptr_t)kaiocb->uaiocb.aio_buf;
 		iovec->iov_len = kaiocb->uaiocb.aio_nbytes;
-		kaiocb = kaiocb->merged;
 		iovec++;
+		kaiocb = kaiocb->merged;
 	}
 }
 
@@ -854,7 +854,7 @@ aio_process_rw(struct kaiocb *job)
 	oublock_st = td->td_ru.ru_oublock;
 
 	/*
-	 * aio_aqueue() acquires a reference to the file that is
+	 * aio_init_kaiocb() acquires a reference to the file that is
 	 * released in aio_free_entry().
 	 */
 	if (cb->aio_lio_opcode == LIO_READ) {
@@ -1554,12 +1554,12 @@ aio_init_kaiocb(struct kaiocb **job, struct aiocb *ujob, struct aiocb_ops *ops)
 	knlist_init_mtx(&job->klist, AIO_MTX(ki));
 	ksiginfo_init(&job->ksi);
 
-
+	return (0);
 }
 
 /*
  * Get the file objects for a list of kaiocb entries.  Check permissions and
- * report any errors, freeing entries that are no longer needed.
+ * store any errors, freeing and clearing affected entries.
  */
 static int
 aio_get_files(struct kaiocb **jobs, int nent)
@@ -1581,7 +1581,7 @@ aio_get_files(struct kaiocb **jobs, int nent)
 		if (job->uaiocb.aio_filedes == fd &&
 		    job->uaiocb.aio_lio_op == op) {
 			if (error == 0) {
-				/* Increment referent count on file. */
+				/* Increment file reference count. */
 				fhold(last_fp);
 				job->fd_file = last_fp;
 			} else {
@@ -1593,7 +1593,7 @@ aio_get_files(struct kaiocb **jobs, int nent)
 			continue;
 		}
 
-		/* Look up the file and peform permissions check. */
+		/* Look up the file and perform permissions check. */
 		fd = job->uaiocb.aio_fildes;
 		switch (opcode) {
 		case LIO_WRITE:
@@ -1631,7 +1631,6 @@ aio_get_files(struct kaiocb **jobs, int nent)
 			failue = true;
 			continue;
 		}
-
 	}
 
 	/*
@@ -1642,7 +1641,7 @@ aio_get_files(struct kaiocb **jobs, int nent)
 }
 
 /*
- * Queue a new simple AIO request.
+ * Queue a new single AIO request.
  */
 int
 aio_aqueue(struct thread *td, struct aiocb *ujob, int type,
@@ -1706,24 +1705,8 @@ aio_kaqueue(struct thread *td, struct kaiocb *job, struct aioliojob *lj,
 		return (EAGAIN);
 	}
 
-
 	/* Get the opcode. */
 	opcode = job->uaiocb.aio_lio_opcode;
-
-
-	if (opcode == LIO_SYNC && fp->f_vnode == NULL) {
-		error = EINVAL;
-		goto aqueue_fail;
-	}
-
-	if ((opcode == LIO_READ || opcode == LIO_WRITE) &&
-	    job->uaiocb.aio_offset < 0 &&
-	    (fp->f_vnode == NULL || fp->f_vnode->v_type != VCHR)) {
-		error = EINVAL;
-		goto aqueue_fail;
-	}
-
-	job->fd_file = fp;
 
 	mtx_lock(&aio_job_mtx);
 	jid = jobrefid++;
@@ -1857,17 +1840,18 @@ aio_queue_file(struct file *fp, struct kaiocb *job)
 	int error;
 	bool safe;
 
-	/*
-	 * If this job is part of a merged chain, it has been combined with the
-	 * head I/O so we can skip it.
-	 */
-	if (job->jobflags & KAIOCB_MERGED)
-		return (0);
-
 	ki = job->userproc->p_aioinfo;
 	error = aio_qbio(job->userproc, job);
 	if (error >= 0)
 		return (error);
+
+	/*
+	 * If this job is part of a merged chain, aio_process_rw will handle
+	 * the whole chain when it processes the head entry.
+	 */
+	if (job->jobflags & KAIOCB_MERGED)
+		return (0);
+
 	safe = false;
 	if (fp->f_type == DTYPE_VNODE) {
 		vp = fp->f_vnode;
@@ -2314,6 +2298,7 @@ aio_lio_merge(struct kaiocb **kacb_list, int nent)
 		    prev->aio_lio_opcode != acb->aio_lio_opcode ||
 		    (acb->aio_lio_opcode != LIO_READ &&
 		     acb->aio_lio_opcode != LIO_WRITE) ||
+		    prev->aio_offset < 0 ||
 		    prev->aio_offset + prev->aio_nbytes != acb->aio_offset ||
 		    cumulative_size + acb->aio_nbytes > IOSIZE_MAX)
 		{
@@ -2420,30 +2405,23 @@ kern_lio_listio(struct thread *td, int mode, struct aiocb * const *uacb_list,
 	lj->lioj_count = 1;
 	AIO_UNLOCK(ki);
 
-	/*
-	 * Allocate all the kaiocb objects we need up front, so that
-	 * we can copy in all the user control blocks and look for
-	 * opportunities to merge them.
-	 */
+	/* Initialize all the kaiocb objects up front. */
 	nerror = 0;
 	kacb_list = malloc(sizeof(struct kaiocb *) * nent, M_LIO, M_WAITOK);
 	for (i = 0; i < nent; i++) {
 		ujob = acb_list[i];
 		if (ujob == NULL) {
-			job = NULL;
-		} else {
-			job = uma_zalloc(aiocb_zone, M_WAITOK | M_ZERO);
-			error = ops->aio_copyin(ujob, &job->uaiocb);
-			if (error) {
-			    ops->store_error(ujob, error);
-			    uma_zfree(aiocb_zone, job);
-			    job = NULL;
-			    nerror++;
-			}
-			job->ujob = ujob;
+			kacb_list[i] = NULL;
+		} if (aio_init_kaiocb(&kacb_list[i], ujob, ops) != 0)
+			nerror++;
 		}
-		kacb_list[i] = job;
 	}
+
+	/* XXX: If we sort them by op, fd, offset here it might help */
+
+	/* Get all file objects. */
+	if (aio_get_files(kacb_list, nent, ops) != 0)
+		nerror++;
 
 	/*
 	 * See if any of the operations can be merged into a
@@ -2451,9 +2429,7 @@ kern_lio_listio(struct thread *td, int mode, struct aiocb * const *uacb_list,
 	 */
 	aio_lio_merge(kacb_list, nent);
 
-	/*
-	 * Get pointers to the list of I/O requests.
-	 */
+	/* Queue all I/O request. */
 	nagain = 0;
 	for (i = 0; i < nent; i++) {
 		job = kacb_list[i];
