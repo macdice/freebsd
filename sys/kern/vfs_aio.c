@@ -1628,6 +1628,8 @@ aio_get_files(struct thread *td, struct kaiocb **jobs, int nent,
 			error = EINVAL;
 		}
 
+		job->fd_file = fp;
+
 		if (error == 0 &&
 		    (opcode == LIO_READ || opcode == LIO_WRITE) &&
 		    job->uaiocb.aio_offset < 0 &&
@@ -1716,7 +1718,7 @@ aio_kaqueue(struct thread *td, struct kaiocb *job, struct aioliojob *lj,
 		uma_zfree(aiocb_zone, job);
 		return (EAGAIN);
 	}
-
+printf("aio_kaqueue 111\n");
 	mtx_lock(&aio_job_mtx);
 	jid = jobrefid++;
 	job->seqno = jobseqno++;
@@ -1728,12 +1730,14 @@ aio_kaqueue(struct thread *td, struct kaiocb *job, struct aioliojob *lj,
 	}
 	job->uaiocb._aiocb_private.kernelinfo = (void *)(intptr_t)jid;
 
+printf("aio_kaqueue 222\n");
 	if (opcode == LIO_NOP) {
 		fdrop(fp, td);
 		uma_zfree(aiocb_zone, job);
 		return (0);
 	}
 
+printf("aio_kaqueue 333\n");
 	if (job->uaiocb.aio_sigevent.sigev_notify != SIGEV_KEVENT)
 		goto no_kqueue;
 	evflags = job->uaiocb.aio_sigevent.sigev_notify_kevent_flags;
@@ -1754,11 +1758,12 @@ aio_kaqueue(struct thread *td, struct kaiocb *job, struct aioliojob *lj,
 
 no_kqueue:
 
+printf("aio_kaqueue 444\n");
 	ops->store_error(ujob, EINPROGRESS);
 	job->uaiocb._aiocb_private.error = EINPROGRESS;
 	job->userproc = p;
 	job->cred = crhold(td->td_ucred);
-	job->jobflags = KAIOCB_QUEUEING;
+	job->jobflags |= KAIOCB_QUEUEING;
 	job->lio = lj;
 
 	if (opcode == LIO_MLOCK) {
@@ -1771,6 +1776,7 @@ no_kqueue:
 	if (error)
 		goto aqueue_fail;
 
+printf("aio_kaqueue 555\n");
 	AIO_LOCK(ki);
 	job->jobflags &= ~KAIOCB_QUEUEING;
 	TAILQ_INSERT_TAIL(&ki->kaio_all, job, allist);
@@ -1791,6 +1797,7 @@ no_kqueue:
 	return (0);
 
 aqueue_fail:
+printf("aio_kaqueue 666\n");
 	knlist_delete(&job->klist, curthread, 0);
 	if (fp)
 		fdrop(fp, td);
@@ -2349,6 +2356,7 @@ kern_lio_listio(struct thread *td, int mode, struct aiocb * const *uacb_list,
 	int nagain, nerror;
 	int i;
 
+printf("kern_lio_listio have %d entries\n", nent);
 	if ((mode != LIO_NOWAIT) && (mode != LIO_WAIT))
 		return (EINVAL);
 
@@ -2418,6 +2426,7 @@ kern_lio_listio(struct thread *td, int mode, struct aiocb * const *uacb_list,
 	nerror = 0;
 	kacb_list = malloc(sizeof(struct kaiocb *) * nent, M_LIO, M_WAITOK);
 	for (i = 0; i < nent; i++) {
+printf("kern_lio_listio will call aio_init_kaiocb for %d\n", i);
 		ujob = acb_list[i];
 		if (ujob == NULL)
 			kacb_list[i] = NULL;
@@ -2428,15 +2437,19 @@ kern_lio_listio(struct thread *td, int mode, struct aiocb * const *uacb_list,
 	/* XXX: If we sort them by op, fd, offset here it might help */
 
 	/* Look up all referenced file objects. */
+printf("kern_lio_listio will call aio_get_files\n");
 	if (aio_get_files(td, kacb_list, nent, ops) != 0)
 		nerror++;
 
 	/* See if any of the I/O requests can be merged into a larger one. */
+printf("kern_lio_listio will call aio_lio_merge\n");
 	aio_lio_merge(kacb_list, nent);
 
 	/* Queue all I/O request. */
+printf("will call aio_kqueue for all requests\n");
 	nagain = 0;
 	for (i = 0; i < nent; i++) {
+printf("will call aio_kqueue for request %d\n", i);
 		job = kacb_list[i];
 		if (job != NULL) {
 			error = aio_kaqueue(td, job, lj, ops);
