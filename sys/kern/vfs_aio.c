@@ -1651,7 +1651,7 @@ error_next:
 }
 
 /*
- * Queue a new single AIO request.
+ * Queue a new one-off AIO request.
  */
 int
 aio_aqueue(struct thread *td, struct aiocb *ujob, int type,
@@ -1707,6 +1707,8 @@ aio_kaqueue(struct thread *td, struct kaiocb *job, struct aioliojob *lj,
 
 	ki = p->p_aioinfo;
 	ujob = job->ujob;
+	opcode = job->uaiocb.aio_lio_opcode;
+	fp = job->fd_file;
 
 	if (num_queue_count >= max_queue_count ||
 	    ki->kaio_count >= max_aio_queue_per_proc) {
@@ -1714,9 +1716,6 @@ aio_kaqueue(struct thread *td, struct kaiocb *job, struct aioliojob *lj,
 		uma_zfree(aiocb_zone, job);
 		return (EAGAIN);
 	}
-
-	/* Get the opcode. */
-	opcode = job->uaiocb.aio_lio_opcode;
 
 	mtx_lock(&aio_job_mtx);
 	jid = jobrefid++;
@@ -2420,11 +2419,10 @@ kern_lio_listio(struct thread *td, int mode, struct aiocb * const *uacb_list,
 	kacb_list = malloc(sizeof(struct kaiocb *) * nent, M_LIO, M_WAITOK);
 	for (i = 0; i < nent; i++) {
 		ujob = acb_list[i];
-		if (ujob == NULL) {
+		if (ujob == NULL)
 			kacb_list[i] = NULL;
-		} if (aio_init_kaiocb(td, &kacb_list[i], ujob, ops) != 0)
+		else if (aio_init_kaiocb(td, &kacb_list[i], ujob, ops) != 0)
 			nerror++;
-		}
 	}
 
 	/* XXX: If we sort them by op, fd, offset here it might help */
@@ -2441,7 +2439,7 @@ kern_lio_listio(struct thread *td, int mode, struct aiocb * const *uacb_list,
 	for (i = 0; i < nent; i++) {
 		job = kacb_list[i];
 		if (job != NULL) {
-			error = aio_kaqueue(td, job, lj, LIO_NOP, ops);
+			error = aio_kaqueue(td, job, lj, ops);
 			if (error == EAGAIN)
 				nagain++;
 			else if (error != 0)
