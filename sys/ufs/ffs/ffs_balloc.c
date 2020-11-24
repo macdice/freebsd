@@ -768,10 +768,14 @@ ffs_balloc_ufs2(struct vnode *vp, off_t startoffset, int size,
 			panic("ffs_balloc_ufs2: BA_METAONLY for direct block");
 		nb = dp->di_db[lbn];
 		if (nb != 0 && ip->i_size >= smalllblktosize(fs, lbn + 1)) {
-			error = bread_gb(vp, lbn, fs->fs_bsize, NOCRED,
-			    gbflags, &bp);
-			if (error) {
-				return (error);
+			if (flags & BA_CLRBUF) {
+				error = bread_gb(vp, lbn, fs->fs_bsize, NOCRED,
+				    gbflags, &bp);
+				if (error) {
+					return (error);
+				}
+			} else {
+				nbp = getblk(vp, lbn, fs->fs_bsize, 0, 0, gbflags);
 			}
 			bp->b_blkno = fsbtodb(fs, nb);
 			*bpp = bp;
