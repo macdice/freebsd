@@ -142,6 +142,7 @@ enum Argtype {
 	/* Pointers to non-structures. */
 	Ptr,
 	AiocbArray,
+	AiocbIovec,
 	AiocbPointer,
 	BinString,
 	CapRights,

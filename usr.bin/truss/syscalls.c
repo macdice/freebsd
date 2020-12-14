@@ -136,6 +136,8 @@ static struct syscall decoded_syscalls[] = {
 	  .args = { { Aiocb, 0 } } },
 	{ .name = "aio_read", .ret_type = 1, .nargs = 1,
 	  .args = { { Aiocb, 0 } } },
+	{ .name = "aio_readv", .ret_type = 1, .nargs = 1,
+	  .args = { { AiocbIovec, 0 } } },
 	{ .name = "aio_return", .ret_type = 1, .nargs = 1,
 	  .args = { { Aiocb, 0 } } },
 	{ .name = "aio_suspend", .ret_type = 1, .nargs = 3,
@@ -144,6 +146,8 @@ static struct syscall decoded_syscalls[] = {
 	  .args = { { AiocbPointer | OUT, 0 }, { Timespec, 1 } } },
 	{ .name = "aio_write", .ret_type = 1, .nargs = 1,
 	  .args = { { Aiocb, 0 } } },
+	{ .name = "aio_writev", .ret_type = 1, .nargs = 1,
+	  .args = { { AiocbIovec, 0 } } },
 	{ .name = "bind", .ret_type = 1, .nargs = 3,
 	  .args = { { Int, 0 }, { Sockaddr | IN, 1 }, { Socklent, 2 } } },
 	{ .name = "bindat", .ret_type = 1, .nargs = 4,
@@ -1418,6 +1422,16 @@ print_aiocb(FILE *fp, struct aiocb *cb)
 			cb->aio_buf,
 			cb->aio_nbytes,
 			xlookup(lio_opcodes, cb->aio_lio_opcode));
+	print_sigevent(fp, &cb->aio_sigevent);
+	fputs(" }", fp);
+}
+
+static void
+print_aiocb_iovec(FILE *fp, struct trussinfo *trussinfo, struct aiocb *cb)
+{
+	fprintf(fp, "{ %d,%jd,", cb->aio_fildes, cb->aio_offset);
+	print_iovec(fp, trussinfo, (uintptr_t)cb->aio_iov, cb->aio_iovcnt);
+	fprintf(fp, ",%d,%s,", cb->aio_iovcnt, xlookup(lio_opcodes, cb->aio_lio_opcode));
 	print_sigevent(fp, &cb->aio_sigevent);
 	fputs(" }", fp);
 }
@@ -2728,6 +2742,15 @@ print_arg(struct syscall_args *sc, unsigned long *args, register_t *retval,
 
 		if (get_struct(pid, args[sc->offset], &cb, sizeof(cb)) != -1)
 			print_aiocb(fp, &cb);
+		else
+			print_pointer(fp, args[sc->offset]);
+		break;
+	}
+	case AiocbIovec: {
+		struct aiocb cb;
+
+		if (get_struct(pid, args[sc->offset], &cb, sizeof(cb)) != -1)
+			print_aiocb_iovec(fp, trussinfo, &cb);
 		else
 			print_pointer(fp, args[sc->offset]);
 		break;
