@@ -1001,9 +1001,12 @@ ffs_write(ap)
 			uio->uio_resid = resid;
 		}
 	} else if (resid > uio->uio_resid && (ioflag & IO_SYNC)) {
-		error = ffs_update(vp, 1);
-		if (ffs_fsfail_cleanup(VFSTOUFS(vp->v_mount), error))
-			error = ENXIO;
+		if (!(ioflag & IO_DATASYNC) ||
+		    (ip->i_flags & (IN_SIZEMOD | IN_IBLKDATA))) {
+			error = ffs_update(vp, 1);
+			if (ffs_fsfail_cleanup(VFSTOUFS(vp->v_mount), error))
+				error = ENXIO;
+		}
 	}
 	return (error);
 }
