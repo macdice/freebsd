@@ -325,12 +325,17 @@ are defined, in addition to the common flags:
 .It Dv USEM_NAMED
 Flag is ignored by kernel.
 .El
-.It Sy Timeout parameter
+.It Sy Timeout and mask parameters
 .Bd -literal
 struct _umtx_time {
 	struct timespec _timeout;
 	uint32_t        _flags;
 	uint32_t        _clockid;
+};
+
+struct _umtx_time_mask {
+	struct _umtx_time _time;
+	uint32_t        _mask;
 };
 .Ed
 .Pp
@@ -348,10 +353,10 @@ argument of
 .Fn _umtx_op .
 They are distinguished by the
 .Fa uaddr
-value, which must be equal to the size of the structure pointed to by
-.Fa uaddr2 ,
-casted to
-.Vt uintptr_t .
+value, which must be
+.Dv UMTX_WAIT_TIMESPEC ,
+.Dv UMTX_WAIT_TIME
+or one of the mask values below.
 .Pp
 The
 .Dv _timeout
@@ -383,6 +388,26 @@ If the flag is absent, the timeout value is relative, that is the amount
 of time, measured by the monotonic wall clock from the moment of the request
 start.
 .El
+.Pp
+The
+.Dv UMTX_OP_WAIT
+operation (and variants) can also take a bit mask value of type
+.Vt uint32_t ,
+indicated by passing
+.Dv UMTX_WAIT_MASK
+as the value of
+.Fa uaddr .
+In that case, the waiter will only be woken up by a
+.Dv UMTX_OP_WAKE
+operation that includes a mask that has at least one bit in common.
+The default mask is
+.Dv UINT32_MAX ,
+meaning that all waiters are woken up.
+.Pp
+To combine a mask with a timeout, use
+.Dv UMTX_WAIT_TIME_MASK
+and a pointer to
+.Vt struct _umtx_time_mask .
 .El
 .Ss SLEEP QUEUES
 When a locking request cannot be immediately satisfied, the thread is
@@ -1420,6 +1445,11 @@ request, or one or more of the values read from the
 .Dv m_ceilings
 array during lock or unlock operations, is greater than
 .Dv RTP_PRIO_MAX .
+.It Bq Er EINVAL
+The mask value provided for
+.Dv UMTX_OP_WAIT ,
+.Dv UMTX_OP_WAKE
+or variants does not have any bits set.
 .It Bq Er EPERM
 Unlock attempted on an object not owned by the current thread.
 .It Bq Er EOWNERDEAD

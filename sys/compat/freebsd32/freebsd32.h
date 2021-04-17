@@ -100,6 +100,11 @@ struct umtx_time32 {
 	uint32_t		_clockid;
 };
 
+struct umtx_time_mask32 {
+	struct umtx_time32	_time;
+	uint32_t		_mask;
+};
+
 struct umtx_robust_lists_params_compat32 {
 	uint32_t	robust_list_offset;
 	uint32_t	robust_priv_list_offset;

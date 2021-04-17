@@ -72,6 +72,15 @@
 #define	USEM_MAX_COUNT		0x7fffffffU
 #define	USEM_COUNT(c)		((c) & USEM_MAX_COUNT)
 
+/* values for uaddr1 used with wait opcodes */
+#define UMTX_WAIT_MASK		((void *)sizeof(uint32_t))
+#define UMTX_WAIT_TIMESPEC	((void *)sizeof(struct timespec))
+#define UMTX_WAIT_TIME		((void *)sizeof(struct _umtx_time))
+#define UMTX_WAIT_TIME_MASK	((void *)sizeof(struct _umtx_time_mask))
+
+/* values for uaddr1 used with wake opcodes */
+#define UMTX_WAKE_MASK		((void *)sizeof(uint32_t))
+
 /* op code for _umtx_op */
 #define	UMTX_OP_RESERVED0	0
 #define	UMTX_OP_RESERVED1	1
@@ -200,7 +209,7 @@ int umtx_key_get(const void *, int, int, struct umtx_key *);
 void umtx_key_release(struct umtx_key *);
 struct umtx_q *umtxq_alloc(void);
 void umtxq_free(struct umtx_q *);
-int kern_umtx_wake(struct thread *, void *, int, int);
+int kern_umtx_wake(struct thread *, void *, int, int, uint32_t);
 void umtx_pi_adjust(struct thread *, u_char);
 void umtx_thread_init(struct thread *);
 void umtx_thread_fini(struct thread *);

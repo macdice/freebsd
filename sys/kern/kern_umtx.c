@@ -145,6 +145,9 @@ struct umtx_q {
 
 	/* The queue we on */
 	struct umtxq_queue	*uq_cur_queue;
+
+	/* A bit mask for selective wakeup */
+	uint32_t		uq_mask;
 };
 
 TAILQ_HEAD(umtxq_head, umtx_q);
@@ -223,12 +226,15 @@ struct umtx_copyops {
 	int	(*copyin_timeout)(const void *uaddr, struct timespec *tsp);
 	int	(*copyin_umtx_time)(const void *uaddr, size_t size,
 	    struct _umtx_time *tp);
+	int	(*copyin_umtx_time_mask)(const void *uaddr, size_t size,
+	    struct _umtx_time_mask *tmp);
 	int	(*copyin_robust_lists)(const void *uaddr, size_t size,
 	    struct umtx_robust_lists_params *rbp);
 	int	(*copyout_timeout)(void *uaddr, size_t size,
 	    struct timespec *tsp);
 	const size_t	timespec_sz;
 	const size_t	umtx_time_sz;
+	const size_t	umtx_time_mask_sz;
 	const bool	compat32;
 };
 
@@ -276,7 +282,7 @@ static void umtxq_lock(struct umtx_key *key);
 static void umtxq_unlock(struct umtx_key *key);
 static void umtxq_busy(struct umtx_key *key);
 static void umtxq_unbusy(struct umtx_key *key);
-static void umtxq_insert_queue(struct umtx_q *uq, int q);
+static void umtxq_insert_queue(struct umtx_q *uq, int q, uint32_t mask);
 static void umtxq_remove_queue(struct umtx_q *uq, int q);
 static int umtxq_sleep(struct umtx_q *uq, const char *wmesg, struct abs_timeout *);
 static int umtxq_count(struct umtx_key *key);
@@ -287,8 +293,10 @@ static int do_unlock_pp(struct thread *td, struct umutex *m, uint32_t flags,
 static void umtx_thread_cleanup(struct thread *td);
 SYSINIT(umtx, SI_SUB_EVENTHANDLER+1, SI_ORDER_MIDDLE, umtxq_sysinit, NULL);
 
-#define umtxq_signal(key, nwake)	umtxq_signal_queue((key), (nwake), UMTX_SHARED_QUEUE)
-#define umtxq_insert(uq)	umtxq_insert_queue((uq), UMTX_SHARED_QUEUE)
+#define umtxq_signal_mask(key, nwake, mask) umtxq_signal_queue((key), (nwake), UMTX_SHARED_QUEUE, (mask))
+#define umtxq_signal(key, nwake)	umtxq_signal_queue((key), (nwake), UMTX_SHARED_QUEUE, UINT32_MAX)
+#define umtxq_insert(uq)	umtxq_insert_queue((uq), UMTX_SHARED_QUEUE, UINT32_MAX)
+#define umtxq_insert_mask(uq, mask)	umtxq_insert_queue((uq), UMTX_SHARED_QUEUE, (mask))
 #define umtxq_remove(uq)	umtxq_remove_queue((uq), UMTX_SHARED_QUEUE)
 
 static struct mtx umtx_lock;
@@ -597,7 +605,7 @@ umtxq_queue_lookup(struct umtx_key *key, int q)
 }
 
 static inline void
-umtxq_insert_queue(struct umtx_q *uq, int q)
+umtxq_insert_queue(struct umtx_q *uq, int q, uint32_t mask)
 {
 	struct umtxq_queue *uh;
 	struct umtxq_chain *uc;
@@ -627,6 +635,7 @@ umtxq_insert_queue(struct umtx_q *uq, int q)
 	uh->length++;
 	uq->uq_flags |= UQF_UMTXQ;
 	uq->uq_cur_queue = uh;
+	uq->uq_mask = mask;
 	return;
 }
 
@@ -699,21 +708,27 @@ umtxq_count_pi(struct umtx_key *key, struct umtx_q **first)
  */
 
 static int
-umtxq_signal_queue(struct umtx_key *key, int n_wake, int q)
+umtxq_signal_queue(struct umtx_key *key, int n_wake, int q, uint32_t mask)
 {
 	struct umtxq_queue *uh;
 	struct umtx_q *uq;
+	struct umtx_q *next;
 	int ret;
 
 	ret = 0;
 	UMTXQ_LOCKED_ASSERT(umtxq_getchain(key));
 	uh = umtxq_queue_lookup(key, q);
 	if (uh != NULL) {
-		while ((uq = TAILQ_FIRST(&uh->head)) != NULL) {
-			umtxq_remove_queue(uq, q);
-			wakeup(uq);
-			if (++ret >= n_wake)
-				return (ret);
+		uq = TAILQ_FIRST(&uh->head);
+		while (uq != NULL) {
+			next = TAILQ_NEXT(uq, uq_link);
+			if ((uq->uq_mask & mask) != 0) {
+				umtxq_remove_queue(uq, q);
+				wakeup(uq);
+				if (++ret >= n_wake)
+					return (ret);
+			}
+			uq = next;
 		}
 	}
 	return (ret);
@@ -913,7 +928,7 @@ umtx_key_release(struct umtx_key *key)
  */
 static int
 do_wait(struct thread *td, void *addr, u_long id,
-    struct _umtx_time *timeout, int compat32, int is_private)
+    struct _umtx_time *timeout, int compat32, int is_private, uint32_t mask)
 {
 	struct abs_timeout timo;
 	struct umtx_q *uq;
@@ -930,7 +945,7 @@ do_wait(struct thread *td, void *addr, u_long id,
 		abs_timeout_init2(&timo, timeout);
 
 	umtxq_lock(&uq->uq_key);
-	umtxq_insert(uq);
+	umtxq_insert_mask(uq, mask);
 	umtxq_unlock(&uq->uq_key);
 	if (compat32 == 0) {
 		error = fueword(addr, &tmp);
@@ -966,7 +981,8 @@ do_wait(struct thread *td, void *addr, u_long id,
  * Wake up threads sleeping on the specified address.
  */
 int
-kern_umtx_wake(struct thread *td, void *uaddr, int n_wake, int is_private)
+kern_umtx_wake(struct thread *td, void *uaddr, int n_wake, int is_private,
+	uint32_t mask)
 {
 	struct umtx_key key;
 	int ret;
@@ -975,7 +991,7 @@ kern_umtx_wake(struct thread *td, void *uaddr, int n_wake, int is_private)
 	    is_private ? THREAD_SHARE : AUTO_SHARE, &key)) != 0)
 		return (ret);
 	umtxq_lock(&key);
-	umtxq_signal(&key, n_wake);
+	umtxq_signal_mask(&key, n_wake, mask);
 	umtxq_unlock(&key);
 	umtx_key_release(&key);
 	return (0);
@@ -2920,7 +2936,7 @@ do_rw_wrlock(struct thread *td, struct urwlock *rwlock, struct _umtx_time *timeo
 				umtxq_lock(&uq->uq_key);
 				umtxq_busy(&uq->uq_key);
 				umtxq_signal_queue(&uq->uq_key, INT_MAX,
-				    UMTX_SHARED_QUEUE);
+				    UMTX_SHARED_QUEUE, UINT32_MAX);
 				umtxq_unbusy(&uq->uq_key);
 				umtxq_unlock(&uq->uq_key);
 			}
@@ -2985,7 +3001,8 @@ sleep:
 		while ((state & URWLOCK_WRITE_OWNER) ||
 		    URWLOCK_READER_COUNT(state) != 0) {
 			umtxq_lock(&uq->uq_key);
-			umtxq_insert_queue(uq, UMTX_EXCLUSIVE_QUEUE);
+			umtxq_insert_queue(uq, UMTX_EXCLUSIVE_QUEUE,
+			    UINT32_MAX);
 			umtxq_unbusy(&uq->uq_key);
 
 			error = umtxq_sleep(uq, "uwrlck", timeout == NULL ?
@@ -3150,7 +3167,7 @@ do_rw_unlock(struct thread *td, struct urwlock *rwlock)
 	if (count) {
 		umtxq_lock(&uq->uq_key);
 		umtxq_busy(&uq->uq_key);
-		umtxq_signal_queue(&uq->uq_key, count, q);
+		umtxq_signal_queue(&uq->uq_key, count, q, UINT32_MAX);
 		umtxq_unbusy(&uq->uq_key);
 		umtxq_unlock(&uq->uq_key);
 	}
@@ -3397,6 +3414,14 @@ do_sem2_wake(struct thread *td, struct _usem2 *sem)
 	return (error);
 }
 
+inline static int
+umtx_timespec_is_invalid(const struct timespec *tsp)
+{
+	return (tsp->tv_sec < 0 ||
+	    tsp->tv_nsec >= 1000000000 ||
+	    tsp->tv_nsec < 0);
+}
+
 inline int
 umtx_copyin_timeout(const void *uaddr, struct timespec *tsp)
 {
@@ -3404,9 +3429,7 @@ umtx_copyin_timeout(const void *uaddr, struct timespec *tsp)
 
 	error = copyin(uaddr, tsp, sizeof(*tsp));
 	if (error == 0) {
-		if (tsp->tv_sec < 0 ||
-		    tsp->tv_nsec >= 1000000000 ||
-		    tsp->tv_nsec < 0)
+		if (umtx_timespec_is_invalid(tsp))
 			error = EINVAL;
 	}
 	return (error);
@@ -3425,8 +3448,34 @@ umtx_copyin_umtx_time(const void *uaddr, size_t size, struct _umtx_time *tp)
 		error = copyin(uaddr, tp, sizeof(*tp));
 	if (error != 0)
 		return (error);
-	if (tp->_timeout.tv_sec < 0 ||
-	    tp->_timeout.tv_nsec >= 1000000000 || tp->_timeout.tv_nsec < 0)
+	if (umtx_timespec_is_invalid(&tp->_timeout))
+		return (EINVAL);
+	return (0);
+}
+
+static inline int
+umtx_copyin_umtx_time_mask(const void *uaddr, size_t size,
+    struct _umtx_time_mask *tmp)
+{
+	int error;
+
+	if (size == sizeof(tmp->_time._timeout)) {
+		tmp->_time._clockid = CLOCK_REALTIME;
+		tmp->_time._flags = 0;
+		tmp->_mask = UINT32_MAX;
+		error = copyin(uaddr, &tmp->_time._timeout,
+		    sizeof(tmp->_time._timeout));
+	} else if (size == sizeof(tmp->_time)) {
+		tmp->_mask = UINT32_MAX;
+		error = copyin(uaddr, &tmp->_time, sizeof(tmp->_time));
+	} else if (size == sizeof(*tmp)) {
+		error = copyin(uaddr, tmp, sizeof(*tmp));
+	} else {
+		error = EINVAL;
+	}
+	if (error != 0)
+		return (error);
+	if (umtx_timespec_is_invalid(&tmp->_time._timeout))
 		return (EINVAL);
 	return (0);
 }
@@ -3468,65 +3517,69 @@ static int
 __umtx_op_wait(struct thread *td, struct _umtx_op_args *uap,
     const struct umtx_copyops *ops)
 {
-	struct _umtx_time timeout, *tm_p;
+	struct _umtx_time_mask time_mask;
+	struct _umtx_time *tm_p;
+	uint32_t mask;
 	int error;
+	int is_private, is_uint;
 
-	if (uap->uaddr2 == NULL)
+	KASSERT(uap->op == UMTX_OP_WAIT ||
+	    uap->op == UMTX_OP_WAIT_UINT ||
+	    uap->op == UMTX_OP_WAIT_UINT_PRIVATE,
+	    ("unexpected opcode for __umtx_op_wait"));
+
+	is_private = uap->op == UMTX_OP_WAIT_UINT_PRIVATE;
+	is_uint = uap->op == UMTX_OP_WAIT_UINT ||
+	    uap->op == UMTX_OP_WAIT_UINT_PRIVATE;
+
+	if (uap->uaddr1 == 0) {
+		error = 0;
+		mask = UINT32_MAX;
 		tm_p = NULL;
-	else {
-		error = ops->copyin_umtx_time(
-		    uap->uaddr2, (size_t)uap->uaddr1, &timeout);
+	} else if ((size_t)uap->uaddr1 == sizeof(mask)) {
+		error = copyin(uap->uaddr2, &mask, sizeof(mask));
+		tm_p = NULL;
+	} else {
+		error = ops->copyin_umtx_time_mask(
+		    uap->uaddr2, (size_t)uap->uaddr1, &time_mask);
 		if (error != 0)
 			return (error);
-		tm_p = &timeout;
+		mask = time_mask._mask;
+		tm_p = &time_mask._time;
 	}
-	return (do_wait(td, uap->obj, uap->val, tm_p, ops->compat32, 0));
-}
-
-static int
-__umtx_op_wait_uint(struct thread *td, struct _umtx_op_args *uap,
-    const struct umtx_copyops *ops)
-{
-	struct _umtx_time timeout, *tm_p;
-	int error;
-
-	if (uap->uaddr2 == NULL)
-		tm_p = NULL;
-	else {
-		error = ops->copyin_umtx_time(
-		    uap->uaddr2, (size_t)uap->uaddr1, &timeout);
-		if (error != 0)
-			return (error);
-		tm_p = &timeout;
-	}
-	return (do_wait(td, uap->obj, uap->val, tm_p, 1, 0));
-}
-
-static int
-__umtx_op_wait_uint_private(struct thread *td, struct _umtx_op_args *uap,
-    const struct umtx_copyops *ops)
-{
-	struct _umtx_time *tm_p, timeout;
-	int error;
-
-	if (uap->uaddr2 == NULL)
-		tm_p = NULL;
-	else {
-		error = ops->copyin_umtx_time(
-		    uap->uaddr2, (size_t)uap->uaddr1, &timeout);
-		if (error != 0)
-			return (error);
-		tm_p = &timeout;
-	}
-	return (do_wait(td, uap->obj, uap->val, tm_p, 1, 1));
+	if (error != 0)
+		return (error);
+	if (mask == 0)
+		return (EINVAL);
+	return (do_wait(td, uap->obj, uap->val, tm_p, is_uint || ops->compat32,
+	    is_private, mask));
 }
 
 static int
 __umtx_op_wake(struct thread *td, struct _umtx_op_args *uap,
     const struct umtx_copyops *ops __unused)
 {
+	uint32_t mask;
+	int is_private;
+	int error;
 
-	return (kern_umtx_wake(td, uap->obj, uap->val, 0));
+	KASSERT(uap->op == UMTX_OP_WAKE || uap->op == UMTX_OP_WAKE_PRIVATE,
+	    ("unexpected op for umtx_op_wake"));
+	is_private = uap->op == UMTX_OP_WAKE_PRIVATE;
+
+	if (uap->uaddr1 == 0)
+		mask = UINT32_MAX;
+	else if ((size_t)uap->uaddr1 == sizeof(mask)) {
+		error = copyin(uap->uaddr2, &mask, sizeof(mask));
+		if (error != 0)
+			return (error);
+	} else {
+		return (EINVAL);
+	}
+	if (mask == 0)
+		return (EINVAL);
+
+	return (kern_umtx_wake(td, uap->obj, uap->val, is_private, mask));
 }
 
 #define BATCH_SIZE	128
@@ -3545,7 +3598,7 @@ __umtx_op_nwake_private_native(struct thread *td, struct _umtx_op_args *uap)
 		if (error != 0)
 			break;
 		for (i = 0; i < tocopy; ++i) {
-			kern_umtx_wake(td, uaddrs[i], INT_MAX, 1);
+			kern_umtx_wake(td, uaddrs[i], INT_MAX, 1, UINT32_MAX);
 		}
 		maybe_yield();
 	}
@@ -3568,7 +3621,7 @@ __umtx_op_nwake_private_compat32(struct thread *td, struct _umtx_op_args *uap)
 			break;
 		for (i = 0; i < tocopy; ++i) {
 			kern_umtx_wake(td, (void *)(uintptr_t)uaddrs[i],
-			    INT_MAX, 1);
+			    INT_MAX, 1, UINT32_MAX);
 		}
 		maybe_yield();
 	}
@@ -3583,14 +3636,6 @@ __umtx_op_nwake_private(struct thread *td, struct _umtx_op_args *uap,
 	if (ops->compat32)
 		return (__umtx_op_nwake_private_compat32(td, uap));
 	return (__umtx_op_nwake_private_native(td, uap));
-}
-
-static int
-__umtx_op_wake_private(struct thread *td, struct _umtx_op_args *uap,
-    const struct umtx_copyops *ops __unused)
-{
-
-	return (kern_umtx_wake(td, uap->obj, uap->val, 1));
 }
 
 static int
@@ -4184,9 +4229,15 @@ struct umtx_timex32 {
 	uint32_t		_clockid;
 };
 
+struct umtx_time_maskx32 {
+	struct	umtx_timex32	_time;
+	uint32_t		_mask;
+};
+
 #ifndef __i386__
 #define	timespeci386	timespec32
 #define	umtx_timei386	umtx_time32
+#define	umtx_time_maski386 umtx_time_mask32
 #endif
 #else /* !__i386__ && !__amd64__ */
 /* 32-bit architectures can emulate i386, so define these almost everywhere. */
@@ -4201,9 +4252,15 @@ struct umtx_timei386 {
 	uint32_t		_clockid;
 };
 
+struct umtx_time_maski386 {
+	struct	umtx_timei386	_time;
+	uint32_t		_mask;
+};
+
 #if defined(__LP64__)
 #define	timespecx32	timespec32
 #define	umtx_timex32	umtx_time32
+#define	umtx_time_maskx32 umtx_time_mask32
 #endif
 #endif
 
@@ -4369,12 +4426,12 @@ static const _umtx_op_func op_table[] = {
 	[UMTX_OP_CV_WAIT]	= __umtx_op_cv_wait,
 	[UMTX_OP_CV_SIGNAL]	= __umtx_op_cv_signal,
 	[UMTX_OP_CV_BROADCAST]	= __umtx_op_cv_broadcast,
-	[UMTX_OP_WAIT_UINT]	= __umtx_op_wait_uint,
+	[UMTX_OP_WAIT_UINT]	= __umtx_op_wait,
 	[UMTX_OP_RW_RDLOCK]	= __umtx_op_rw_rdlock,
 	[UMTX_OP_RW_WRLOCK]	= __umtx_op_rw_wrlock,
 	[UMTX_OP_RW_UNLOCK]	= __umtx_op_rw_unlock,
-	[UMTX_OP_WAIT_UINT_PRIVATE] = __umtx_op_wait_uint_private,
-	[UMTX_OP_WAKE_PRIVATE]	= __umtx_op_wake_private,
+	[UMTX_OP_WAIT_UINT_PRIVATE] = __umtx_op_wait,
+	[UMTX_OP_WAKE_PRIVATE]	= __umtx_op_wake,
 	[UMTX_OP_MUTEX_WAIT]	= __umtx_op_wait_umutex,
 	[UMTX_OP_MUTEX_WAKE]	= __umtx_op_wake_umutex,
 #if defined(COMPAT_FREEBSD9) || defined(COMPAT_FREEBSD10)
@@ -4395,20 +4452,24 @@ static const _umtx_op_func op_table[] = {
 static const struct umtx_copyops umtx_native_ops = {
 	.copyin_timeout = umtx_copyin_timeout,
 	.copyin_umtx_time = umtx_copyin_umtx_time,
+	.copyin_umtx_time_mask = umtx_copyin_umtx_time_mask,
 	.copyin_robust_lists = umtx_copyin_robust_lists,
 	.copyout_timeout = umtx_copyout_timeout,
 	.timespec_sz = sizeof(struct timespec),
 	.umtx_time_sz = sizeof(struct _umtx_time),
+	.umtx_time_mask_sz = sizeof(struct _umtx_time_mask),
 };
 
 #ifndef __i386__
 static const struct umtx_copyops umtx_native_opsi386 = {
 	.copyin_timeout = umtx_copyin_timeouti386,
 	.copyin_umtx_time = umtx_copyin_umtx_timei386,
+	.copyin_umtx_time_mask = NULL /*umtx_copyin_umtx_time_maski386*/,
 	.copyin_robust_lists = umtx_copyin_robust_lists32,
 	.copyout_timeout = umtx_copyout_timeouti386,
 	.timespec_sz = sizeof(struct timespeci386),
 	.umtx_time_sz = sizeof(struct umtx_timei386),
+	.umtx_time_mask_sz = sizeof(struct umtx_time_maski386),
 	.compat32 = true,
 };
 #endif
@@ -4418,10 +4479,12 @@ static const struct umtx_copyops umtx_native_opsi386 = {
 static const struct umtx_copyops umtx_native_opsx32 = {
 	.copyin_timeout = umtx_copyin_timeoutx32,
 	.copyin_umtx_time = umtx_copyin_umtx_timex32,
+	.copyin_umtx_time_mask = NULL /*umtx_copyin_umtx_time_maskx32*/,
 	.copyin_robust_lists = umtx_copyin_robust_lists32,
 	.copyout_timeout = umtx_copyout_timeoutx32,
 	.timespec_sz = sizeof(struct timespecx32),
 	.umtx_time_sz = sizeof(struct umtx_timex32),
+	.umtx_time_mask_sz = sizeof(struct umtx_time_maskx32),
 	.compat32 = true,
 };
 

@@ -78,4 +78,9 @@ struct _umtx_time {
 	__uint32_t		_clockid;
 };
 
+struct _umtx_time_mask {
+	struct _umtx_time	_time;
+	__uint32_t		_mask;
+};
+
 #endif /* !_SYS__UMTX_H_ */
