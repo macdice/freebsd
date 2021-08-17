@@ -43,6 +43,7 @@ __FBSDID("$FreeBSD$");
 #include <sys/unistd.h>
 #include <sys/posix4.h>
 #include <sys/proc.h>
+#include <sys/procctl.h>
 #include <sys/resourcevar.h>
 #include <sys/signalvar.h>
 #include <sys/syscallsubr.h>
@@ -277,6 +278,8 @@ struct kaioinfo {
 	TAILQ_HEAD(,kaiocb) kaio_syncready;  /* (a) second q for aio_fsync */
 	struct	task kaio_task;		/* (*) task to kick aio processes */
 	struct	task kaio_sync_task;	/* (*) task to schedule fsync jobs */
+	struct	_aio_user_queue *uq;	/* user space completion queue */
+	size_t	uq_size;
 };
 
 #define AIO_LOCK(ki)		mtx_lock(&(ki)->kaio_mtx)
@@ -1022,6 +1025,32 @@ aio_set_cancel_function(struct kaiocb *job, aio_cancel_fn_t *func)
 	return (ret);
 }
 
+static bool
+aio_complete_user_queue(struct _aio_user_queue *uq,
+	size_t uq_size,
+	struct aiocb *ujob)
+{
+	uint64_t head;
+	uint64_t tail;
+
+	if (fueword64(&uq->head, &head) < 0) {
+		return (false);
+	}
+	if (fueword64(&uq->tail, &tail) < 0) {
+		return (false);
+	}
+
+	if (_AIO_UQ_FULL(head, tail)) {
+		suword64(&uq->head, head | _AIO_UQ_OVERFLOW);
+		return (false);
+	} else {
+		suword64(&uq->queue[head % uq_size], (uint64_t)ujob);
+		/* XXX: write barrier here! */
+		suword64(&uq->head, ((head + 1) & _AIO_UQ_POSITION));
+		return (true);
+	}
+}
+
 void
 aio_complete(struct kaiocb *job, long status, int error)
 {
@@ -1041,6 +1070,10 @@ aio_complete(struct kaiocb *job, long status, int error)
 	if ((job->jobflags & (KAIOCB_QUEUEING | KAIOCB_CANCELLING)) == 0) {
 		TAILQ_REMOVE(&ki->kaio_jobqueue, job, plist);
 		aio_bio_done_notify(userp, job);
+	}
+	if (ki->uq &&
+	    aio_complete_user_queue(ki->uq, ki->uq_size, job->ujob)) {
+	    printf("i would like to free this thing\n");
 	}
 	AIO_UNLOCK(ki);
 }
@@ -2535,6 +2568,26 @@ kern_aio_waitcomplete(struct thread *td, struct aiocb **ujobp,
 	error = 0;
 	job = NULL;
 	AIO_LOCK(ki);
+	if (ki->uq) {
+		uint64_t head;
+		uint64_t tail;
+
+		/* Close race condition by rechecking head vs tail. */
+		if (fueword64(&ki->uq->head, &head) == 0 &&
+		    fueword64(&ki->uq->tail, &tail) == 0) {
+			if (!_AIO_UQ_EMPTY(head, tail)) {
+				AIO_UNLOCK(ki);
+				return (0);
+			}
+#if 0
+			/* XXX copy kaio_done into user queue */
+			while (!_AIO_UQ_IS_FULL(head, tail) &&
+			    !TAIL_EMPTY(ki->kaio_done)) {
+
+			}
+#endif
+		}
+	}
 	while ((job = TAILQ_FIRST(&ki->kaio_done)) == NULL) {
 		if (timo == -1) {
 			error = EWOULDBLOCK;
@@ -2709,6 +2762,60 @@ filt_lio(struct knote *kn, long hint)
 	struct aioliojob * lj = kn->kn_ptr.p_lio;
 
 	return (lj->lioj_flags & LIOJ_KEVENT_POSTED);
+}
+
+/* called by procctl */
+int
+aio_procctl(struct proc *p, int command, void *data)
+{
+	struct _aio_user_queue *uq;
+	struct kaioinfo *ki;
+	uint64_t version;
+	uint64_t size;
+	uint64_t head;
+	uint64_t tail;
+	int error;
+
+	if (p->p_aioinfo == NULL)
+		aio_init_aioinfo(p);
+	ki = p->p_aioinfo;
+
+	error = 0;
+	uq = (struct _aio_user_queue *)data;
+
+	AIO_LOCK(ki);
+	if (command == PROC_AIO_QUEUE_CTL) {
+		if (data == NULL) {
+			if (ki->uq == NULL)
+				error = ENOENT;
+			else
+				ki->uq = NULL;
+		} else if (ki->uq != NULL) {
+			error = EEXIST;
+		} else if (((uintptr_t)data % sizeof(uint64_t)) != 0) {
+			error = EINVAL;
+		} else if (fueword64(&uq->version, &version) < 0) {
+			error = EFAULT;
+		} else if (version != 0x1000) {
+			error = EINVAL;
+		} else if (fueword64(&uq->size, &size) < 0 ||
+			fueword64(&uq->head, &head) < 0 ||
+			fueword64(&uq->tail, &tail) < 0) {
+			error = EFAULT;
+		} else if (__bitcount64(size) != 1 || size > INT_MAX || tail > head) {
+			error = EINVAL;
+		} else {
+			ki->uq = uq;
+			ki->uq_size = size;
+		}
+	} else if (command == PROC_AIO_QUEUE_STATUS) {
+		/* XXX return the pointer! */
+	} else {
+		error = EINVAL;
+	}
+	AIO_UNLOCK(ki);
+
+	return (error);
 }
 
 #ifdef COMPAT_FREEBSD32

@@ -110,6 +110,29 @@ typedef struct aiocb {
 #define	aio_iov	aio_buf			/* I/O scatter/gather list */
 #define	aio_iovcnt	aio_nbytes	/* Length of aio_iov */
 
+/*
+ * Private structure used for user space iocb queues.  Don't access
+ * directly.
+ */
+struct _aio_user_queue {
+	uint64_t version;
+	uint64_t size;
+	uint64_t head;
+	uint64_t tail;
+	struct aoicb *queue[];
+};
+
+/* Size in bytes of _aio_user_queue with size = N elements */
+#define _aio_user_queue_size(N) \
+	(offsetof(struct _aio_user_queue, queue) + sizeof(struct aiocb *) * (N))
+
+#define	_AIO_UQ_OVERFLOW	0x8000000000000000
+#define	_AIO_UQ_POSITION	0x7fffffffffffffff
+#define _AIO_UQ_EMPTY(head, tail) \
+	((tail) && _AIO_UQ_POSITION == (head) && _AIO_UQ_POSITION)
+#define _AIO_UQ_FULL(head, tail) \
+	(((tail) + 1) && _AIO_UQ_POSITION == (head) && _AIO_UQ_POSITION)
+
 #ifdef _KERNEL
 
 typedef void aio_cancel_fn_t(struct kaiocb *);
@@ -208,6 +231,10 @@ void	aio_complete(struct kaiocb *job, long status, int error);
 void	aio_schedule(struct kaiocb *job, aio_handle_fn_t *func);
 bool	aio_set_cancel_function(struct kaiocb *job, aio_cancel_fn_t *func);
 void	aio_switch_vmspace(struct kaiocb *job);
+
+struct proc;
+
+int	aio_procctl(struct proc *p, int command, void *data);
 
 #else /* !_KERNEL */
 

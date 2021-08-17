@@ -30,6 +30,7 @@
 #include <sys/cdefs.h>
 __FBSDID("$FreeBSD$");
 
+#include <sys/aio.h>
 #include <sys/param.h>
 #include <sys/systm.h>
 #include <sys/capsicum.h>
@@ -666,6 +667,13 @@ sys_procctl(struct thread *td, struct procctl_args *uap)
 	case PROC_PDEATHSIG_STATUS:
 		data = &signum;
 		break;
+	case PROC_AIO_QUEUE_CTL:
+		data = uap->data;
+		break;
+	case PROC_AIO_QUEUE_STATUS:
+		error = copyin(uap->data, &data, sizeof(data));
+		if (error != 0)
+			return (error);
 	default:
 		return (EINVAL);
 	}
@@ -692,6 +700,9 @@ sys_procctl(struct thread *td, struct procctl_args *uap)
 	case PROC_PDEATHSIG_STATUS:
 		if (error == 0)
 			error = copyout(&signum, uap->data, sizeof(signum));
+		break;
+	case PROC_AIO_QUEUE_STATUS:
+		/* TODO */
 		break;
 	}
 	return (error);
@@ -771,6 +782,8 @@ kern_procctl(struct thread *td, idtype_t idtype, id_t id, int com, void *data)
 	case PROC_PDEATHSIG_STATUS:
 	case PROC_NO_NEW_PRIVS_CTL:
 	case PROC_NO_NEW_PRIVS_STATUS:
+	case PROC_AIO_QUEUE_CTL:
+	case PROC_AIO_QUEUE_STATUS:
 		if (idtype != P_PID)
 			return (EINVAL);
 	}
@@ -794,6 +807,12 @@ kern_procctl(struct thread *td, idtype_t idtype, id_t id, int com, void *data)
 		*(int *)data = p->p_pdeathsig;
 		PROC_UNLOCK(p);
 		return (0);
+	case PROC_AIO_QUEUE_CTL:
+	case PROC_AIO_QUEUE_STATUS:
+		p = td->td_proc;
+		if (id != 0 && id != p->p_pid)
+			return (EINVAL);
+		return (aio_procctl(p, com, data));
 	}
 
 	switch (com) {

@@ -65,6 +65,8 @@
 #define	PROC_STACKGAP_STATUS	18	/* query stack gap */
 #define	PROC_NO_NEW_PRIVS_CTL	19	/* disable setuid/setgid */
 #define	PROC_NO_NEW_PRIVS_STATUS 20	/* query suid/sgid disabled status */
+#define	PROC_AIO_QUEUE_CTL	21	/* configure AIO queues */
+#define	PROC_AIO_QUEUE_STATUS	22	/* query AIO queues */
 
 /* Operations for PROC_SPROTECT (passed in integer arg). */
 #define	PPROT_OP(x)	((x) & 0xf)
