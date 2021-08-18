@@ -119,12 +119,12 @@ struct _aio_user_queue {
 	uint64_t size;
 	uint64_t head;
 	uint64_t tail;
-	struct aoicb *queue[];
+	volatile  u_long queue[];
 };
 
 /* Size in bytes of _aio_user_queue with size = N elements */
 #define _aio_user_queue_size(N) \
-	(offsetof(struct _aio_user_queue, queue) + sizeof(struct aiocb *) * (N))
+	(sizeof(uint64_t) * 4 + sizeof(struct aiocb *) * (N))
 
 /* Private flags used in _aio_user-queue. */
 #define _AIO_UQ_VERSION		0x0000000000001000

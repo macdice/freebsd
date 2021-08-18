@@ -1848,7 +1848,7 @@ no_kqueue:
 		goto err3;
 
 	AIO_LOCK(ki);
-	aio_uq_cleanup(ki);
+	//aio_uq_cleanup(ki);
 	job->jobflags &= ~KAIOCB_QUEUEING;
 	TAILQ_INSERT_TAIL(&ki->kaio_all, job, allist);
 	ki->kaio_count++;
