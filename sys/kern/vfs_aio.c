@@ -1604,7 +1604,8 @@ aiocb_store_uq(struct _aio_user_queue *uq, uint32_t position,
     struct aiocb *ujob)
 {
 
-	return (suword((uint32_t *)&uq->queue + position, (uintptr_t) ujob));
+	return (suword((volatile uint32_t *)&uq->queue + position,
+	    (uintptr_t) ujob));
 }
 
 static struct aiocb_ops aiocb_ops = {
@@ -3121,7 +3122,8 @@ aiocb32_store_uq(struct _aio_user_queue *uq, uint32_t position,
     struct aiocb *ujob)
 {
 
-	return (suword32((uint32_t *)&uq->queue + position, (uintptr_t) ujob));
+	return (suword32((volatile uint32_t *)&uq->queue + position,
+	    (uintptr_t) ujob));
 }
 
 static struct aiocb_ops aiocb32_ops = {
