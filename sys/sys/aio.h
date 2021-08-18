@@ -132,9 +132,9 @@ struct _aio_user_queue {
 #define	_AIO_UQ_POSITION_MASK	0x7fffffffffffffff
 #define	_AIO_UQ_POSITION(x)	((x) & _AIO_UQ_POSITION_MASK)
 #define _AIO_UQ_EMPTY(head, tail) \
-	(_AIO_UQ_POSITION(tail) == _AIO_UQ_POSITION(head))
+	(_AIO_UQ_POSITION(head) == _AIO_UQ_POSITION(tail))
 #define _AIO_UQ_FULL(head, tail) \
-	(_AIO_UQ_POSITION((tail) + 1) == _AIO_UQ_POSITION(head))
+	(_AIO_UQ_POSITION((head) + 1) == _AIO_UQ_POSITION(tail))
 
 /* Private flags used in __aiocb_private. */
 #define _AIO_UE_USER_QUEUE	0x80000000

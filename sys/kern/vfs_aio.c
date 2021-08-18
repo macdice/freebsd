@@ -1082,12 +1082,14 @@ printf("aio_notify_user_queue ujob=%p\n", job->ujob);
 	 */
 	if (job->uaiocb.aio_sigevent.sigev_notify == SIGEV_KEVENT) {
 		suword64(&uq->head, head | _AIO_UQ_OVERFLOW);
+printf("aio_notify_user_queue reason #1\n");
 		return (false);
 	}
 
 	/* Out of space? */
 	if (_AIO_UQ_FULL(head, tail)) {
 		suword64(&uq->head, head | _AIO_UQ_OVERFLOW);
+printf("aio_notify_user_queue reason #2\n");
 		return (false);
 	}
 
