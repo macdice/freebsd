@@ -1056,8 +1056,6 @@ aio_notify_user_queue(struct proc *p, struct kaiocb *job)
 	ki = p->p_aioinfo;
 	uq = ki->uq;
 
-printf("aio_notify_user_queue ujob=%p\n", job->ujob);
-
 	AIO_LOCK_ASSERT(ki, MA_OWNED);
 	MPASS(job->jobflags & KAIOCB_FINISHED);
 	MPASS(!(job->jobflags & KAIOCB_USER_QUEUE));
@@ -1082,14 +1080,12 @@ printf("aio_notify_user_queue ujob=%p\n", job->ujob);
 	 */
 	if (job->uaiocb.aio_sigevent.sigev_notify == SIGEV_KEVENT) {
 		suword64(&uq->head, head | _AIO_UQ_OVERFLOW);
-printf("aio_notify_user_queue reason #1\n");
 		return (false);
 	}
 
 	/* Out of space? */
 	if (_AIO_UQ_FULL(head, tail)) {
 		suword64(&uq->head, head | _AIO_UQ_OVERFLOW);
-printf("aio_notify_user_queue reason #2\n");
 		return (false);
 	}
 
@@ -1101,7 +1097,7 @@ printf("aio_notify_user_queue reason #2\n");
 	job->ops->store_uq(uq, pos, job->ujob);
 	atomic_thread_fence_rel();
 	suword64(&uq->head,
-	    (head | _AIO_UQ_OVERFLOW) | ((head + 1) & _AIO_UQ_POSITION_MASK));
+	    (head & _AIO_UQ_OVERFLOW) | ((head + 1) & _AIO_UQ_POSITION_MASK));
 
 	/*
 	 * All error numbers exposed to user space are expected to be positive
