@@ -273,15 +273,15 @@ struct kaioinfo {
 	int	kaio_buffer_count;	/* (a) number of bio buffers */
 	TAILQ_HEAD(,kaiocb) kaio_all;	/* (a) all AIOs in a process */
 	TAILQ_HEAD(,kaiocb) kaio_done;	/* (a) done queue for process */
-	TAILQ_HEAD(,kaiocb) kaio_uq;	/* (a) uq cleanup queue for process */
+	TAILQ_HEAD(,kaiocb) kaio_free;	/* (a) uq cleanup queue for process */
 	TAILQ_HEAD(,aioliojob) kaio_liojoblist; /* (a) list of lio jobs */
 	TAILQ_HEAD(,kaiocb) kaio_jobqueue;	/* (a) job queue for process */
 	TAILQ_HEAD(,kaiocb) kaio_syncqueue;	/* (a) queue for aio_fsync */
 	TAILQ_HEAD(,kaiocb) kaio_syncready;  /* (a) second q for aio_fsync */
 	struct	task kaio_task;		/* (*) task to kick aio processes */
 	struct	task kaio_sync_task;	/* (*) task to schedule fsync jobs */
-	struct	_aio_user_queue *uq;	/* user space completion queue */
-	size_t	uq_size;
+	struct	_aio_user_queue *kaio_uq;	/* (a) user space queue */
+	size_t	kaio_uq_size;
 };
 
 #define AIO_LOCK(ki)		mtx_lock(&(ki)->kaio_mtx)
@@ -451,9 +451,10 @@ aio_init_aioinfo(struct proc *p)
 	ki->kaio_active_count = 0;
 	ki->kaio_count = 0;
 	ki->kaio_buffer_count = 0;
+	ki->kaio_uq = NULL;
 	TAILQ_INIT(&ki->kaio_all);
 	TAILQ_INIT(&ki->kaio_done);
-	TAILQ_INIT(&ki->kaio_uq);
+	TAILQ_INIT(&ki->kaio_free);
 	TAILQ_INIT(&ki->kaio_jobqueue);
 	TAILQ_INIT(&ki->kaio_liojoblist);
 	TAILQ_INIT(&ki->kaio_syncqueue);
@@ -517,7 +518,7 @@ aio_free_entry(struct kaiocb *job)
 	MPASS(ki->kaio_count >= 0);
 
 	if (job->jobflags & KAIOCB_USER_QUEUE)
-		TAILQ_REMOVE(&ki->kaio_uq, job, plist);
+		TAILQ_REMOVE(&ki->kaio_free, job, plist);
 	else
 		TAILQ_REMOVE(&ki->kaio_done, job, plist);
 	TAILQ_REMOVE(&ki->kaio_all, job, allist);
@@ -905,7 +906,7 @@ aio_bio_done_notify(struct proc *userp, struct kaiocb *job)
 	if (ki->kaio_flags & KAIO_RUNDOWN)
 		goto notification_done;
 
-	if (ki->uq)
+	if (ki->kaio_uq)
 		aio_notify_user_queue(userp, job);
 
 	if (job->uaiocb.aio_sigevent.sigev_notify == SIGEV_SIGNAL ||
@@ -1054,7 +1055,7 @@ aio_notify_user_queue(struct proc *p, struct kaiocb *job)
 	status = job->uaiocb._aiocb_private.status;
 	error = job->uaiocb._aiocb_private.error;
 	ki = p->p_aioinfo;
-	uq = ki->uq;
+	uq = ki->kaio_uq;
 
 	AIO_LOCK_ASSERT(ki, MA_OWNED);
 	MPASS(job->jobflags & KAIOCB_FINISHED);
@@ -1093,8 +1094,9 @@ aio_notify_user_queue(struct proc *p, struct kaiocb *job)
 	 * Write the iocb's address into the queue at head position, before we
 	 * advance the head.  Pairs with user space aio_waitcomplete().
 	 */
-	pos = head % ki->uq_size;
+	pos = head % ki->kaio_uq_size;
 	job->ops->store_uq(uq, pos, job->ujob);
+printf("XXX stored %p in position %u\n", job->ujob, pos);
 	atomic_thread_fence_rel();
 	suword64(&uq->head,
 	    (head & _AIO_UQ_OVERFLOW) | ((head + 1) & _AIO_UQ_POSITION_MASK));
@@ -1131,7 +1133,7 @@ aio_notify_user_queue(struct proc *p, struct kaiocb *job)
 	 */
 	TAILQ_REMOVE(&ki->kaio_done, job, plist);
 	job->jobflags |= KAIOCB_USER_QUEUE;
-	TAILQ_INSERT_TAIL(&ki->kaio_uq, job, plist);
+	TAILQ_INSERT_TAIL(&ki->kaio_free, job, plist);
 
 	return (true);
 }
@@ -1143,7 +1145,7 @@ aio_uq_cleanup(struct kaioinfo *ki)
 
 	AIO_LOCK_ASSERT(ki, MA_OWNED);
 
-	while ((job = TAILQ_FIRST(&ki->kaio_uq)) != NULL) {
+	while ((job = TAILQ_FIRST(&ki->kaio_free)) != NULL) {
 printf("aio_uq_cleanup cleaning ujob %p", job->ujob);
 		MPASS(job->jobflags & KAIOCB_FINISHED);
 		MPASS(job->jobflags & KAIOCB_USER_QUEUE);
@@ -1604,7 +1606,7 @@ aiocb_store_uq(struct _aio_user_queue *uq, uint32_t position,
     struct aiocb *ujob)
 {
 
-	return (suword((volatile uint32_t *)&uq->queue + position,
+	return (suword((volatile uint64_t *)&uq->queue + position,
 	    (uintptr_t) ujob));
 }
 
@@ -2680,13 +2682,13 @@ kern_aio_waitcomplete(struct thread *td, struct aiocb **ujobp,
 	error = 0;
 	job = NULL;
 	AIO_LOCK(ki);
-	if (ki->uq) {
+	if (ki->kaio_uq) {
 		uint64_t head;
 		uint64_t tail;
 
 		/* Close race condition by rechecking head vs tail. */
-		if (fueword64(&ki->uq->head, &head) == 0 &&
-		    fueword64(&ki->uq->tail, &tail) == 0) {
+		if (fueword64(&ki->kaio_uq->head, &head) == 0 &&
+		    fueword64(&ki->kaio_uq->tail, &tail) == 0) {
 			if (!_AIO_UQ_EMPTY(head, tail)) {
 				AIO_UNLOCK(ki);
 				return (0);
@@ -2898,11 +2900,11 @@ aio_procctl(struct proc *p, int command, void *data)
 	AIO_LOCK(ki);
 	if (command == PROC_AIO_QUEUE_CTL) {
 		if (data == NULL) {
-			if (ki->uq == NULL)
+			if (ki->kaio_uq == NULL)
 				error = ENOENT;
 			else
-				ki->uq = NULL;
-		} else if (ki->uq != NULL) {
+				ki->kaio_uq = NULL;
+		} else if (ki->kaio_uq != NULL) {
 			error = EEXIST;		/* already got a queue */
 		} else if (((uintptr_t)data % sizeof(uint64_t)) != 0) {
 			error = EINVAL;		/* bad alignment */
@@ -2920,8 +2922,8 @@ aio_procctl(struct proc *p, int command, void *data)
 		} else if (tail != head) {
 			error = EINVAL;		/* queue not empty */
 		} else {
-			ki->uq = uq;
-			ki->uq_size = size;
+			ki->kaio_uq = uq;
+			ki->kaio_uq_size = size;
 		}
 	} else if (command == PROC_AIO_QUEUE_STATUS) {
 		/* XXX return the pointer! */
