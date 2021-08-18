@@ -677,6 +677,8 @@ restart:
 	while ((job = TAILQ_FIRST(&ki->kaio_done)) != NULL)
 		aio_free_entry(job);
 
+	aio_cleanup_user_queue(ki);
+
 	while ((lj = TAILQ_FIRST(&ki->kaio_liojoblist)) != NULL) {
 		if (lj->lioj_count == 0) {
 			TAILQ_REMOVE(&ki->kaio_liojoblist, lj, lioj_list);
@@ -691,7 +693,6 @@ restart:
 		}
 	}
 
-	aio_cleanup_user_queue(ki);
 	AIO_UNLOCK(ki);
 	taskqueue_drain(taskqueue_aiod_kick, &ki->kaio_task);
 	taskqueue_drain(taskqueue_aiod_kick, &ki->kaio_sync_task);
