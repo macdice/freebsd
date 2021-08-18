@@ -119,7 +119,7 @@ struct _aio_user_queue {
 	uint64_t size;
 	uint64_t head;
 	uint64_t tail;
-	volatile  u_long queue[];
+	volatile  uintptr_t queue[];
 };
 
 /* Size in bytes of _aio_user_queue with size = N elements */

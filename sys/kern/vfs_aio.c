@@ -332,7 +332,8 @@ static void	aio_proc_rundown_exec(void *arg, struct proc *p,
 static int	aio_qbio(struct proc *p, struct kaiocb *job);
 static void	aio_daemon(void *param);
 static void	aio_bio_done_notify(struct proc *userp, struct kaiocb *job);
-static bool	aio_notify_user_queue(struct proc *p, struct kaiocb *job);
+static bool	aio_notify_user_queue(struct kaioinfo *ki, struct kaiocb *job);
+static void	aio_cleanup_user_queue(struct kaioinfo *ki);
 static bool	aio_clear_cancel_function_locked(struct kaiocb *job);
 static int	aio_kick(struct proc *userp);
 static void	aio_kick_nowait(struct proc *userp);
@@ -566,8 +567,6 @@ aio_free_entry(struct kaiocb *job)
 	 * thread pointer at close time to differ from the thread pointer
 	 * at open time, but this is already true of file descriptors in
 	 * a multithreaded process.
-	 *
-	 * XXX All of the above is broken by this scheme!
 	 */
 	if (job->fd_file)
 		fdrop(job->fd_file, curthread);
@@ -691,6 +690,8 @@ restart:
 			    lj->lioj_count, lj->lioj_finished_count);
 		}
 	}
+
+	aio_cleanup_user_queue(ki);
 	AIO_UNLOCK(ki);
 	taskqueue_drain(taskqueue_aiod_kick, &ki->kaio_task);
 	taskqueue_drain(taskqueue_aiod_kick, &ki->kaio_sync_task);
@@ -907,7 +908,7 @@ aio_bio_done_notify(struct proc *userp, struct kaiocb *job)
 		goto notification_done;
 
 	if (ki->kaio_uq)
-		aio_notify_user_queue(userp, job);
+		aio_notify_user_queue(ki, job);
 
 	if (job->uaiocb.aio_sigevent.sigev_notify == SIGEV_SIGNAL ||
 	    job->uaiocb.aio_sigevent.sigev_notify == SIGEV_THREAD_ID)
@@ -1042,19 +1043,17 @@ aio_set_cancel_function(struct kaiocb *job, aio_cancel_fn_t *func)
  * successful, move the job from kaicb_done to kaiocb_uq, for later cleanup.
  */
 static bool
-aio_notify_user_queue(struct proc *p, struct kaiocb *job)
+aio_notify_user_queue(struct kaioinfo *ki, struct kaiocb *job)
 {
+	struct _aio_user_queue *uq;
 	uint64_t head;
 	uint64_t tail;
 	uint32_t pos;
-	struct kaioinfo *ki;
-	struct _aio_user_queue *uq;
 	long status;
 	long error;
 
 	status = job->uaiocb._aiocb_private.status;
 	error = job->uaiocb._aiocb_private.error;
-	ki = p->p_aioinfo;
 	uq = ki->kaio_uq;
 
 	AIO_LOCK_ASSERT(ki, MA_OWNED);
@@ -1139,14 +1138,14 @@ printf("XXX stored %p in position %u\n", job->ujob, pos);
 }
 
 static void
-aio_uq_cleanup(struct kaioinfo *ki)
+aio_cleanup_user_queue(struct kaioinfo *ki)
 {
 	struct kaiocb *job;
 
 	AIO_LOCK_ASSERT(ki, MA_OWNED);
 
 	while ((job = TAILQ_FIRST(&ki->kaio_free)) != NULL) {
-printf("aio_uq_cleanup cleaning ujob %p", job->ujob);
+printf("XXX aio_cleanup_user_queue cleaning ujob %p\n", job->ujob);
 		MPASS(job->jobflags & KAIOCB_FINISHED);
 		MPASS(job->jobflags & KAIOCB_USER_QUEUE);
 		aio_free_entry(job);
@@ -1851,7 +1850,6 @@ no_kqueue:
 		goto err3;
 
 	AIO_LOCK(ki);
-	//aio_uq_cleanup(ki);
 	job->jobflags &= ~KAIOCB_QUEUEING;
 	TAILQ_INSERT_TAIL(&ki->kaio_all, job, allist);
 	ki->kaio_count++;
@@ -1867,6 +1865,7 @@ no_kqueue:
 		aio_bio_done_notify(p, job);
 	} else
 		TAILQ_INSERT_TAIL(&ki->kaio_jobqueue, job, plist);
+	aio_cleanup_user_queue(ki);
 	AIO_UNLOCK(ki);
 	return (0);
 
