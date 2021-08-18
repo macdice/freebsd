@@ -1056,6 +1056,8 @@ aio_notify_user_queue(struct proc *p, struct kaiocb *job)
 	ki = p->p_aioinfo;
 	uq = ki->uq;
 
+printf("aio_notify_user_queue ujob=%p\n", job->ujob);
+
 	AIO_LOCK_ASSERT(ki, MA_OWNED);
 	MPASS(job->jobflags & KAIOCB_FINISHED);
 	MPASS(!(job->jobflags & KAIOCB_USER_QUEUE));
@@ -1137,13 +1139,14 @@ aio_notify_user_queue(struct proc *p, struct kaiocb *job)
 }
 
 static void
-aio_clean_uq(struct kaioinfo *ki)
+aio_uq_cleanup(struct kaioinfo *ki)
 {
 	struct kaiocb *job;
 
 	AIO_LOCK_ASSERT(ki, MA_OWNED);
 
 	while ((job = TAILQ_FIRST(&ki->kaio_uq)) != NULL) {
+printf("aio_uq_cleanup cleaning ujob %p", job->ujob);
 		MPASS(job->jobflags & KAIOCB_FINISHED);
 		MPASS(job->jobflags & KAIOCB_USER_QUEUE);
 		aio_free_entry(job);
@@ -1847,6 +1850,7 @@ no_kqueue:
 		goto err3;
 
 	AIO_LOCK(ki);
+	aio_uq_cleanup(ki);
 	job->jobflags &= ~KAIOCB_QUEUEING;
 	TAILQ_INSERT_TAIL(&ki->kaio_all, job, allist);
 	ki->kaio_count++;
