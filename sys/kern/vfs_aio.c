@@ -232,6 +232,7 @@ typedef struct oaiocb {
 #define	KAIOCB_CHECKSYNC	0x08
 #define	KAIOCB_CLEARED		0x10
 #define	KAIOCB_FINISHED		0x20
+#define	KAIOCB_USER_QUEUE	0x40
 
 /*
  * AIO process info
@@ -272,6 +273,7 @@ struct kaioinfo {
 	int	kaio_buffer_count;	/* (a) number of bio buffers */
 	TAILQ_HEAD(,kaiocb) kaio_all;	/* (a) all AIOs in a process */
 	TAILQ_HEAD(,kaiocb) kaio_done;	/* (a) done queue for process */
+	TAILQ_HEAD(,kaiocb) kaio_uq;	/* (a) uq cleanup queue for process */
 	TAILQ_HEAD(,aioliojob) kaio_liojoblist; /* (a) list of lio jobs */
 	TAILQ_HEAD(,kaiocb) kaio_jobqueue;	/* (a) job queue for process */
 	TAILQ_HEAD(,kaiocb) kaio_syncqueue;	/* (a) queue for aio_fsync */
@@ -302,6 +304,7 @@ struct aiocb_ops {
 	int	(*store_error)(struct aiocb *ujob, long error);
 	int	(*store_kernelinfo)(struct aiocb *ujob, long jobref);
 	int	(*store_aiocb)(struct aiocb **ujobp, struct aiocb *ujob);
+	int	(*store_uq)(struct _aio_user_queue *uq, uint32_t position, struct aiocb *ujob);
 };
 
 static TAILQ_HEAD(,aioproc) aio_freeproc;		/* (c) Idle daemons */
@@ -329,6 +332,7 @@ static void	aio_proc_rundown_exec(void *arg, struct proc *p,
 static int	aio_qbio(struct proc *p, struct kaiocb *job);
 static void	aio_daemon(void *param);
 static void	aio_bio_done_notify(struct proc *userp, struct kaiocb *job);
+static bool	aio_notify_user_queue(struct proc *p, struct kaiocb *job);
 static bool	aio_clear_cancel_function_locked(struct kaiocb *job);
 static int	aio_kick(struct proc *userp);
 static void	aio_kick_nowait(struct proc *userp);
@@ -449,6 +453,7 @@ aio_init_aioinfo(struct proc *p)
 	ki->kaio_buffer_count = 0;
 	TAILQ_INIT(&ki->kaio_all);
 	TAILQ_INIT(&ki->kaio_done);
+	TAILQ_INIT(&ki->kaio_uq);
 	TAILQ_INIT(&ki->kaio_jobqueue);
 	TAILQ_INIT(&ki->kaio_liojoblist);
 	TAILQ_INIT(&ki->kaio_syncqueue);
@@ -489,9 +494,7 @@ aio_sendsig(struct proc *p, struct sigevent *sigev, ksiginfo_t *ksi, bool ext)
 }
 
 /*
- * Free a job entry.  Wait for completion if it is currently active, but don't
- * delay forever.  If we delay, we return a flag that says that we have to
- * restart the queue scan.
+ * Free a job entry.
  */
 static int
 aio_free_entry(struct kaiocb *job)
@@ -513,7 +516,10 @@ aio_free_entry(struct kaiocb *job)
 	ki->kaio_count--;
 	MPASS(ki->kaio_count >= 0);
 
-	TAILQ_REMOVE(&ki->kaio_done, job, plist);
+	if (job->jobflags & KAIOCB_USER_QUEUE)
+		TAILQ_REMOVE(&ki->kaio_uq, job, plist);
+	else
+		TAILQ_REMOVE(&ki->kaio_done, job, plist);
 	TAILQ_REMOVE(&ki->kaio_all, job, allist);
 
 	lj = job->lio;
@@ -559,6 +565,8 @@ aio_free_entry(struct kaiocb *job)
 	 * thread pointer at close time to differ from the thread pointer
 	 * at open time, but this is already true of file descriptors in
 	 * a multithreaded process.
+	 *
+	 * XXX All of the above is broken by this scheme!
 	 */
 	if (job->fd_file)
 		fdrop(job->fd_file, curthread);
@@ -897,6 +905,9 @@ aio_bio_done_notify(struct proc *userp, struct kaiocb *job)
 	if (ki->kaio_flags & KAIO_RUNDOWN)
 		goto notification_done;
 
+	if (ki->uq)
+		aio_notify_user_queue(userp, job);
+
 	if (job->uaiocb.aio_sigevent.sigev_notify == SIGEV_SIGNAL ||
 	    job->uaiocb.aio_sigevent.sigev_notify == SIGEV_THREAD_ID)
 		aio_sendsig(userp, &job->uaiocb.aio_sigevent, &job->ksi, true);
@@ -1025,29 +1036,117 @@ aio_set_cancel_function(struct kaiocb *job, aio_cancel_fn_t *func)
 	return (ret);
 }
 
+/*
+ * Try to write a completion notification into the user space queue.  If
+ * successful, move the job from kaicb_done to kaiocb_uq, for later cleanup.
+ */
 static bool
-aio_complete_user_queue(struct _aio_user_queue *uq,
-	size_t uq_size,
-	struct aiocb *ujob)
+aio_notify_user_queue(struct proc *p, struct kaiocb *job)
 {
 	uint64_t head;
 	uint64_t tail;
+	uint32_t pos;
+	struct kaioinfo *ki;
+	struct _aio_user_queue *uq;
+	long status;
+	long error;
 
-	if (fueword64(&uq->head, &head) < 0) {
+	status = job->uaiocb._aiocb_private.status;
+	error = job->uaiocb._aiocb_private.error;
+	ki = p->p_aioinfo;
+	uq = ki->uq;
+
+	AIO_LOCK_ASSERT(ki, MA_OWNED);
+	MPASS(job->jobflags & KAIOCB_FINISHED);
+	MPASS(!(job->jobflags & KAIOCB_USER_QUEUE));
+	MPASS(uq != NULL);
+
+	/*
+	 * Sanity check that we can access the memory.  We don't do this for
+	 * the stores.  There isn't much we can really do if user space
+	 * unmaps the queue from under us.
+	 */
+	if (fueword64(&uq->head, &head) < 0 ||
+	    fueword64(&uq->tail, &tail) < 0)
+	    return (false);
+
+	/*
+	 * For now, we can't immediately move jobs to the user queue if the
+	 * user requested a kevent notification.  They would be freed by the
+	 * next call to aio_clean_uq(), along with their knotes, potentially
+	 * before the user calls kevent().  So, leave the job in kaio_done.
+	 * User space aio_suspend(), aio_error(), aio_return() and
+	 * aio_waitcomplete() will need to enter the kernel.
+	 */
+	if (job->uaiocb.aio_sigevent.sigev_notify == SIGEV_KEVENT) {
+		suword64(&uq->head, head | _AIO_UQ_OVERFLOW);
 		return (false);
 	}
-	if (fueword64(&uq->tail, &tail) < 0) {
-		return (false);
-	}
 
+	/* Out of space? */
 	if (_AIO_UQ_FULL(head, tail)) {
 		suword64(&uq->head, head | _AIO_UQ_OVERFLOW);
 		return (false);
-	} else {
-		suword64(&uq->queue[head % uq_size], (uint64_t)ujob);
-		/* XXX: write barrier here! */
-		suword64(&uq->head, ((head + 1) & _AIO_UQ_POSITION));
-		return (true);
+	}
+
+	/*
+	 * Write the iocb's address into the queue at head position, before we
+	 * advance the head.  Pairs with user space aio_waitcomplete().
+	 */
+	pos = head % ki->uq_size;
+	job->ops->store_uq(uq, pos, job->ujob);
+	atomic_thread_fence_rel();
+	suword64(&uq->head,
+	    (head | _AIO_UQ_OVERFLOW) | ((head + 1) & _AIO_UQ_POSITION_MASK));
+
+	/*
+	 * All error numbers exposed to user space are expected to be positive
+	 * and fit into the lower bits of a long (even when that's 32 bit).
+	 * We'll use the other bits to indicate that aio_error(), aio_return()
+	 * and aio_suspend() are allowed to use the value from user space
+	 * directly.  In particular, aio_return() doesn't need to enter the
+	 * kernel to release the kernel resource; instead it needs to zero out
+	 * the entry in the wait queue, so that (1) aio_return() succeeds only
+	 * once for a given iocb and (2) aio_waitcomplete() doesn't return an
+	 * iocb already consumed by aio_return(), or vice versa.
+	 */
+	MPASS((error & _AIO_UE_ERRNO_MASK) == error);
+	error |= _AIO_UE_USER_QUEUE;
+	error |= (pos << _AIO_UE_POSITION_SHIFT);
+
+	/*
+	 * Store the status after we write the iocb's address, and before we
+	 * write the error.  Pairs with user space aio_return().
+	 */
+	job->ops->store_status(job->ujob, status);
+	atomic_thread_fence_rel();
+	job->ops->store_error(job->ujob, error);
+
+	/*
+	 * We can't free the job immediately, because we don't have a thread
+	 * from the process that submitted it.  Cleanup is deferred until the
+	 * next system call.  We can't get too far behind if we always run
+	 * cleanup while submitting new IOs, though it be nice to figure out
+	 * how to move that work into the background.
+	 */
+	TAILQ_REMOVE(&ki->kaio_done, job, plist);
+	job->jobflags |= KAIOCB_USER_QUEUE;
+	TAILQ_INSERT_TAIL(&ki->kaio_uq, job, plist);
+
+	return (true);
+}
+
+static void
+aio_clean_uq(struct kaioinfo *ki)
+{
+	struct kaiocb *job;
+
+	AIO_LOCK_ASSERT(ki, MA_OWNED);
+
+	while ((job = TAILQ_FIRST(&ki->kaio_uq)) != NULL) {
+		MPASS(job->jobflags & KAIOCB_FINISHED);
+		MPASS(job->jobflags & KAIOCB_USER_QUEUE);
+		aio_free_entry(job);
 	}
 }
 
@@ -1070,10 +1169,6 @@ aio_complete(struct kaiocb *job, long status, int error)
 	if ((job->jobflags & (KAIOCB_QUEUEING | KAIOCB_CANCELLING)) == 0) {
 		TAILQ_REMOVE(&ki->kaio_jobqueue, job, plist);
 		aio_bio_done_notify(userp, job);
-	}
-	if (ki->uq &&
-	    aio_complete_user_queue(ki->uq, ki->uq_size, job->ujob)) {
-	    printf("i would like to free this thing\n");
 	}
 	AIO_UNLOCK(ki);
 }
@@ -1503,6 +1598,14 @@ aiocb_store_aiocb(struct aiocb **ujobp, struct aiocb *ujob)
 	return (suword(ujobp, (long)ujob));
 }
 
+static int
+aiocb_store_uq(struct _aio_user_queue *uq, uint32_t position,
+    struct aiocb *ujob)
+{
+
+	return (suword((uint32_t *)&uq->queue + position, (uintptr_t) ujob));
+}
+
 static struct aiocb_ops aiocb_ops = {
 	.aio_copyin = aiocb_copyin,
 	.fetch_status = aiocb_fetch_status,
@@ -1511,6 +1614,7 @@ static struct aiocb_ops aiocb_ops = {
 	.store_error = aiocb_store_error,
 	.store_kernelinfo = aiocb_store_kernelinfo,
 	.store_aiocb = aiocb_store_aiocb,
+	.store_uq = aiocb_store_uq,
 };
 
 #ifdef COMPAT_FREEBSD6
@@ -1522,6 +1626,7 @@ static struct aiocb_ops aiocb_ops_osigevent = {
 	.store_error = aiocb_store_error,
 	.store_kernelinfo = aiocb_store_kernelinfo,
 	.store_aiocb = aiocb_store_aiocb,
+	.store_uq = aiocb_store_uq,
 };
 #endif
 
@@ -1605,6 +1710,9 @@ aio_aqueue(struct thread *td, struct aiocb *ujob, struct aioliojob *lj,
 
 	/* Save userspace address of the job info. */
 	job->ujob = ujob;
+
+	/* Save the ops vtable. */
+	job->ops = ops;
 
 	/*
 	 * Validate the opcode and fetch the file object for the specified
@@ -1953,6 +2061,7 @@ kern_aio_return(struct thread *td, struct aiocb *ujob, struct aiocb_ops *ops)
 	}
 	if (job != NULL) {
 		MPASS(job->jobflags & KAIOCB_FINISHED);
+		MPASS(!(job->jobflags & KAIOCB_USER_QUEUE));
 		status = job->uaiocb._aiocb_private.status;
 		error = job->uaiocb._aiocb_private.error;
 		td->td_retval[0] = status;
@@ -2791,19 +2900,22 @@ aio_procctl(struct proc *p, int command, void *data)
 			else
 				ki->uq = NULL;
 		} else if (ki->uq != NULL) {
-			error = EEXIST;
+			error = EEXIST;		/* already got a queue */
 		} else if (((uintptr_t)data % sizeof(uint64_t)) != 0) {
-			error = EINVAL;
+			error = EINVAL;		/* bad alignment */
 		} else if (fueword64(&uq->version, &version) < 0) {
-			error = EFAULT;
-		} else if (version != 0x1000) {
-			error = EINVAL;
+			error = EFAULT;		/* can't access version */
+		} else if (version != _AIO_UQ_VERSION) {
+			error = EINVAL;		/* version mismatch */
 		} else if (fueword64(&uq->size, &size) < 0 ||
-			fueword64(&uq->head, &head) < 0 ||
-			fueword64(&uq->tail, &tail) < 0) {
-			error = EFAULT;
-		} else if (__bitcount64(size) != 1 || size > INT_MAX || tail > head) {
-			error = EINVAL;
+		    fueword64(&uq->head, &head) < 0 ||
+		    fueword64(&uq->tail, &tail) < 0) {
+			error = EFAULT;		/* can't access fields */
+		} else if (__bitcount64(size) != 1 ||
+		    (size - 1) > _AIO_UE_POSITION_MASK) {
+			error = EINVAL;		/* not pow of 2 or too big */
+		} else if (tail != head) {
+			error = EINVAL;		/* queue not empty */
 		} else {
 			ki->uq = uq;
 			ki->uq_size = size;
@@ -3002,6 +3114,14 @@ aiocb32_store_aiocb(struct aiocb **ujobp, struct aiocb *ujob)
 	return (suword32(ujobp, (long)ujob));
 }
 
+static int
+aiocb32_store_uq(struct _aio_user_queue *uq, uint32_t position,
+    struct aiocb *ujob)
+{
+
+	return (suword32((uint32_t *)&uq->queue + position, (uintptr_t) ujob));
+}
+
 static struct aiocb_ops aiocb32_ops = {
 	.aio_copyin = aiocb32_copyin,
 	.fetch_status = aiocb32_fetch_status,
@@ -3010,6 +3130,7 @@ static struct aiocb_ops aiocb32_ops = {
 	.store_error = aiocb32_store_error,
 	.store_kernelinfo = aiocb32_store_kernelinfo,
 	.store_aiocb = aiocb32_store_aiocb,
+	.store_uq = aiocb32_store_uq,
 };
 
 #ifdef COMPAT_FREEBSD6
@@ -3021,6 +3142,7 @@ static struct aiocb_ops aiocb32_ops_osigevent = {
 	.store_error = aiocb32_store_error,
 	.store_kernelinfo = aiocb32_store_kernelinfo,
 	.store_aiocb = aiocb32_store_aiocb,
+	.store_uq = aiocb32_store_uq,
 };
 #endif
 

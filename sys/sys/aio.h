@@ -126,12 +126,21 @@ struct _aio_user_queue {
 #define _aio_user_queue_size(N) \
 	(offsetof(struct _aio_user_queue, queue) + sizeof(struct aiocb *) * (N))
 
+/* Private flags used in _aio_user-queue. */
+#define _AIO_UQ_VERSION		0x0000000000001000
 #define	_AIO_UQ_OVERFLOW	0x8000000000000000
-#define	_AIO_UQ_POSITION	0x7fffffffffffffff
+#define	_AIO_UQ_POSITION_MASK	0x7fffffffffffffff
+#define	_AIO_UQ_POSITION(x)	((x) & _AIO_UQ_POSITION_MASK)
 #define _AIO_UQ_EMPTY(head, tail) \
-	((tail) && _AIO_UQ_POSITION == (head) && _AIO_UQ_POSITION)
+	(_AIO_UQ_POSITION(tail) == _AIO_UQ_POSITION(head))
 #define _AIO_UQ_FULL(head, tail) \
-	(((tail) + 1) && _AIO_UQ_POSITION == (head) && _AIO_UQ_POSITION)
+	(_AIO_UQ_POSITION((tail) + 1) == _AIO_UQ_POSITION(head))
+
+/* Private flags used in __aiocb_private. */
+#define _AIO_UE_USER_QUEUE	0x80000000
+#define _AIO_UE_POSITION_MASK	0x7fff0000
+#define _AIO_UE_POSITION_SHIFT	16
+#define _AIO_UE_ERRNO_MASK	0x0000ffff
 
 #ifdef _KERNEL
 
@@ -170,6 +179,7 @@ struct kaiocb {
 	uint64_t seqno;			/* (*) job number */
 	aio_cancel_fn_t *cancel_fn;	/* (a) backend cancel function */
 	aio_handle_fn_t *handle_fn;	/* (c) backend handle function */
+	struct	aiocb_ops *ops;		/* ... */
 	union {				/* Backend-specific data fields */
 		struct {		/* BIO backend */
 			int	nbio;	/* Number of remaining bios */
