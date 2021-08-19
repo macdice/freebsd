@@ -1058,12 +1058,11 @@ aio_notify_user_queue(struct kaioinfo *ki, struct kaiocb *job)
 	uq = ki->kaio_uq;
 
 	AIO_LOCK_ASSERT(ki, MA_OWNED);
+	MPASS(curproc->p_vmspace == job->userproc->p_vmspace);
 	MPASS(job->jobflags & KAIOCB_FINISHED);
 	MPASS(!(job->jobflags & KAIOCB_USER_QUEUE));
 	MPASS(uq != NULL);
 
-	if (curproc->p_vmspace != job->userproc->p_vmspace)
-		aio_switch_vmspace(job);
 
 	/*
 	 * Sanity check that we can access the memory.  We don't do this for
@@ -1167,6 +1166,16 @@ aio_complete(struct kaiocb *job, long status, int error)
 
 	userp = job->userproc;
 	ki = userp->p_aioinfo;
+
+	/*
+	 * aio_notify_user_queue(), reached by aio_bio_done_notify(), requires
+	 * us to be in the user vmspace (and we can't switch while holding a
+	 * mutex).  That's already the case for aio_process_rw() and other
+	 * common cases, but not for eg aio_process_sync().  Switch if
+	 * necessary.
+	 */
+	if (curproc->p_vmspace != job->userproc->p_vmspace)
+		aio_switch_vmspace(job);
 
 	AIO_LOCK(ki);
 	KASSERT(!(job->jobflags & KAIOCB_FINISHED),
