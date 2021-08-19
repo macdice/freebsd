@@ -1062,6 +1062,9 @@ aio_notify_user_queue(struct kaioinfo *ki, struct kaiocb *job)
 	MPASS(!(job->jobflags & KAIOCB_USER_QUEUE));
 	MPASS(uq != NULL);
 
+	if (curproc->p_vmspace != job->userproc->p_vmspace)
+		aio_switch_vmspace(job);
+
 	/*
 	 * Sanity check that we can access the memory.  We don't do this for
 	 * the stores.  There isn't much we can really do if user space
