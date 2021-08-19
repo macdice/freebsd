@@ -1164,24 +1164,35 @@ aio_can_notify_user_queue(struct kaiocb *job)
 }
 
 static bool
-aio_drain_to_user_queue(struct kaioinfo *ki)
+aio_user_queue_empty(struct kaioinfo *ki)
 {
-	bool user_queue_not_empty;
-	struct kaiocb *job;
 	uint64_t head;
 	uint64_t tail;
 
 	AIO_LOCK_ASSERT(ki, MA_OWNED);
 
-	/* Close race condition by rechecking head vs tail. */
-	user_queue_not_empty = false;
-	if (fueword64(&ki->kaio_uq->head, &head) == 0 &&
-	    fueword64(&ki->kaio_uq->tail, &tail) == 0) {
-		if (!_AIO_UQ_EMPTY(head, tail))
-			user_queue_not_empty = true;
-	}
+	if (!ki->kaio_uq)
+		return (true);
 
-	/* Drain as many items as we can from kaio_done to the user queue. */
+	if (fueword64(&ki->kaio_uq->head, &head) == 0 &&
+	    fueword64(&ki->kaio_uq->tail, &tail) == 0)
+		return (_AIO_UQ_EMPTY(head, tail));
+
+	return (true);
+}
+
+static bool
+aio_drain_to_user_queue(struct kaioinfo *ki)
+{
+	bool user_queue_not_empty;
+	struct kaiocb *job;
+
+	AIO_LOCK_ASSERT(ki, MA_OWNED);
+
+	/* Close race condition by rechecking head vs tail. */
+	user_queue_not_empty = !aio_user_queue_empty(ki);
+
+	/* Drain as many more items as we can from kaio_done -> uq. */
 	while ((job = TAILQ_FIRST(&ki->kaio_done)) != NULL) {
 		if (!aio_notify_user_queue(ki, job))
 			break;
@@ -2748,11 +2759,13 @@ kern_aio_waitcomplete(struct thread *td, struct aiocb **ujobp,
 	if (ki->kaio_uq) {
 		if (aio_drain_to_user_queue(ki)) {
 			AIO_UNLOCK(ki);
+			td->td_retval[0] = 0;
 			ops->store_aiocb(ujobp, 0);
 			return (0);
 		}
 	}
-	while ((job = TAILQ_FIRST(&ki->kaio_done)) == NULL) {
+	while ((job = TAILQ_FIRST(&ki->kaio_done)) == NULL &&
+		aio_user_queue_empty(ki)) {
 		if (timo == -1) {
 			error = EWOULDBLOCK;
 			break;
@@ -2764,6 +2777,12 @@ kern_aio_waitcomplete(struct thread *td, struct aiocb **ujobp,
 			error = EINTR;
 		if (error)
 			break;
+	}
+	if (!aio_user_queue_empty(ki)) {
+		AIO_UNLOCK(ki);
+		td->td_retval[0] = 0;
+		ops->store_aiocb(ujobp, 0);
+		return (0);
 	}
 	if (job != NULL) {
 		MPASS(job->jobflags & KAIOCB_FINISHED);
