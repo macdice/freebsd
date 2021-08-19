@@ -2934,6 +2934,10 @@ aio_procctl(struct proc *p, int command, void *data)
 		} else if (tail != head) {
 			error = EINVAL;		/* queue not empty */
 		} else {
+			/*
+			 * XXX do we need to wire this memory to avoid faulting?
+			 * XXX are there problems with SMAP?
+			 */
 			ki->kaio_uq = uq;
 			ki->kaio_uq_size = size;
 		}
