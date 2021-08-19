@@ -332,6 +332,7 @@ static void	aio_proc_rundown_exec(void *arg, struct proc *p,
 static int	aio_qbio(struct proc *p, struct kaiocb *job);
 static void	aio_daemon(void *param);
 static void	aio_bio_done_notify(struct proc *userp, struct kaiocb *job);
+static bool	aio_can_notify_user_queue(struct kaiocb *job);
 static bool	aio_notify_user_queue(struct kaioinfo *ki, struct kaiocb *job);
 static void	aio_cleanup_user_queue(struct kaioinfo *ki);
 static bool	aio_clear_cancel_function_locked(struct kaiocb *job);
@@ -908,7 +909,7 @@ aio_bio_done_notify(struct proc *userp, struct kaiocb *job)
 	if (ki->kaio_flags & KAIO_RUNDOWN)
 		goto notification_done;
 
-	if (ki->kaio_uq)
+	if (ki->kaio_uq && aio_can_notify_user_queue(job))
 		aio_notify_user_queue(ki, job);
 
 	if (job->uaiocb.aio_sigevent.sigev_notify == SIGEV_SIGNAL ||
@@ -1042,6 +1043,9 @@ aio_set_cancel_function(struct kaiocb *job, aio_cancel_fn_t *func)
 /*
  * Try to write a completion notification into the user space queue.  If
  * successful, move the job from kaicb_done to kaiocb_uq, for later cleanup.
+ * Return true on success, false if there wasn't space or the job is one that
+ * can't be moved to user space.  If false, the OVERFLOW flag is set, so user
+ * space aio_waitcomplete() will enter the kernel.
  */
 static bool
 aio_notify_user_queue(struct kaioinfo *ki, struct kaiocb *job)
@@ -1052,6 +1056,7 @@ aio_notify_user_queue(struct kaioinfo *ki, struct kaiocb *job)
 	uint32_t pos;
 	long status;
 	long error;
+	bool have_more_in_kernel;
 
 	status = job->uaiocb._aiocb_private.status;
 	error = job->uaiocb._aiocb_private.error;
@@ -1063,7 +1068,6 @@ aio_notify_user_queue(struct kaioinfo *ki, struct kaiocb *job)
 	MPASS(!(job->jobflags & KAIOCB_USER_QUEUE));
 	MPASS(uq != NULL);
 
-
 	/*
 	 * Sanity check that we can access the memory.  We don't do this for
 	 * the stores.  There isn't much we can really do if user space
@@ -1073,24 +1077,23 @@ aio_notify_user_queue(struct kaioinfo *ki, struct kaiocb *job)
 	    fueword64(&uq->tail, &tail) < 0)
 	    return (false);
 
-	/*
-	 * For now, we can't immediately move jobs to the user queue if the
-	 * user requested a kevent notification.  They would be freed by the
-	 * next call to aio_clean_uq(), along with their knotes, potentially
-	 * before the user calls kevent().  So, leave the job in kaio_done.
-	 * User space aio_suspend(), aio_error(), aio_return() and
-	 * aio_waitcomplete() will need to enter the kernel.
-	 */
-	if (job->uaiocb.aio_sigevent.sigev_notify == SIGEV_KEVENT) {
-		suword64(&uq->head, head | _AIO_UQ_OVERFLOW);
-		return (false);
-	}
-
 	/* Out of space? */
 	if (_AIO_UQ_FULL(head, tail)) {
 		suword64(&uq->head, head | _AIO_UQ_OVERFLOW);
 		return (false);
 	}
+
+	/* Can't move this job to user space queue? */
+	if (!aio_can_notify_user_queue(job)) {
+		suword64(&uq->head, head | _AIO_UQ_OVERFLOW);
+		return (false);
+	}
+
+	/*
+	 * After this item, are there more in kaio_done?  We'll keep the
+	 * OVERFLOW bit on until there is nothing in kaio_done.
+	 */
+	have_more_in_kernel = TAILQ_NEXT(job, plist) != NULL;
 
 	/*
 	 * Write the iocb's address into the queue at head position, before we
@@ -1101,7 +1104,8 @@ aio_notify_user_queue(struct kaioinfo *ki, struct kaiocb *job)
 printf("XXX stored %p in position %u\n", job->ujob, pos);
 	atomic_thread_fence_rel();
 	suword64(&uq->head,
-	    (head & _AIO_UQ_OVERFLOW) | ((head + 1) & _AIO_UQ_POSITION_MASK));
+	    (have_more_in_kernel ? _AIO_UQ_OVERFLOW : 0) |
+	    ((head + 1) & _AIO_UQ_POSITION_MASK));
 
 	/*
 	 * All error numbers exposed to user space are expected to be positive
@@ -1138,6 +1142,53 @@ printf("XXX stored %p in position %u\n", job->ujob, pos);
 	TAILQ_INSERT_TAIL(&ki->kaio_free, job, plist);
 
 	return (true);
+}
+
+/*
+ * Some jobs can't be notified by user queue yet.  Those need to be handled by
+ * the traditional kernel routines.
+ */
+static bool
+aio_can_notify_user_queue(struct kaiocb *job)
+{
+	/*
+	 * For now, we can't move jobs to the user queue if the user requested
+	 * a kevent notification.  They would be freed by the next call to
+	 * aio_cleanup_user_queue(), along with their knotes, potentially
+	 * before the user calls kevent().
+	 */
+	if (job->uaiocb.aio_sigevent.sigev_notify == SIGEV_KEVENT)
+		return (false);
+
+	return (true);
+}
+
+static bool
+aio_drain_to_user_queue(struct kaioinfo *ki)
+{
+	bool user_queue_not_empty;
+	struct kaiocb *job;
+	uint64_t head;
+	uint64_t tail;
+
+	AIO_LOCK_ASSERT(ki, MA_OWNED);
+
+	/* Close race condition by rechecking head vs tail. */
+	user_queue_not_empty = false;
+	if (fueword64(&ki->kaio_uq->head, &head) == 0 &&
+	    fueword64(&ki->kaio_uq->tail, &tail) == 0) {
+		if (!_AIO_UQ_EMPTY(head, tail))
+			user_queue_not_empty = true;
+	}
+
+	/* Drain as many items as we can from kaio_done to the user queue. */
+	while ((job = TAILQ_FIRST(&ki->kaio_done)) != NULL) {
+		if (!aio_notify_user_queue(ki, job))
+			break;
+		user_queue_not_empty = true;
+	}
+
+	return (user_queue_not_empty);
 }
 
 static void
@@ -2695,23 +2746,10 @@ kern_aio_waitcomplete(struct thread *td, struct aiocb **ujobp,
 	job = NULL;
 	AIO_LOCK(ki);
 	if (ki->kaio_uq) {
-		uint64_t head;
-		uint64_t tail;
-
-		/* Close race condition by rechecking head vs tail. */
-		if (fueword64(&ki->kaio_uq->head, &head) == 0 &&
-		    fueword64(&ki->kaio_uq->tail, &tail) == 0) {
-			if (!_AIO_UQ_EMPTY(head, tail)) {
-				AIO_UNLOCK(ki);
-				return (0);
-			}
-#if 0
-			/* XXX copy kaio_done into user queue */
-			while (!_AIO_UQ_IS_FULL(head, tail) &&
-			    !TAIL_EMPTY(ki->kaio_done)) {
-
-			}
-#endif
+		if (aio_drain_to_user_queue(ki)) {
+			AIO_UNLOCK(ki);
+			ops->store_aiocb(ujobp, 0);
+			return (0);
 		}
 	}
 	while ((job = TAILQ_FIRST(&ki->kaio_done)) == NULL) {
@@ -2727,7 +2765,6 @@ kern_aio_waitcomplete(struct thread *td, struct aiocb **ujobp,
 		if (error)
 			break;
 	}
-
 	if (job != NULL) {
 		MPASS(job->jobflags & KAIOCB_FINISHED);
 		ujob = job->ujob;
