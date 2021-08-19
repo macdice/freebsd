@@ -1101,7 +1101,6 @@ aio_notify_user_queue(struct kaioinfo *ki, struct kaiocb *job)
 	 */
 	pos = head % ki->kaio_uq_size;
 	job->ops->store_uq(uq, pos, job->ujob);
-printf("XXX stored %p in position %u\n", job->ujob, pos);
 	atomic_thread_fence_rel();
 	suword64(&uq->head,
 	    (have_more_in_kernel ? _AIO_UQ_OVERFLOW : 0) |
@@ -1210,7 +1209,6 @@ aio_cleanup_user_queue(struct kaioinfo *ki)
 	AIO_LOCK_ASSERT(ki, MA_OWNED);
 
 	while ((job = TAILQ_FIRST(&ki->kaio_free)) != NULL) {
-printf("XXX aio_cleanup_user_queue cleaning ujob %p\n", job->ujob);
 		MPASS(job->jobflags & KAIOCB_FINISHED);
 		MPASS(job->jobflags & KAIOCB_USER_QUEUE);
 		aio_free_entry(job);
