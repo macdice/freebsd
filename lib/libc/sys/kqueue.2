@@ -145,6 +145,15 @@ The same array may be used for the
 and
 .Fa eventlist .
 .Pp
+The special value
+.Va KQUEUE_FD_ANON
+may be given as the
+.Va fd
+argument to
+.Fn kevent .
+In this case, an anonymous temporary queue is used, and no longer exists
+after the call returns.
+.Pp
 The
 .Fn EV_SET
 macro is provided for ease of initializing a
@@ -262,6 +271,9 @@ Filters may set this flag to indicate filter-specific EOF condition.
 See
 .Sx RETURN VALUES
 below.
+.It Dv EV_ANON
+This is used for anonymous operations that are not associated with a particular
+kqueue descriptor.
 .It Dv EV_KEEPUDATA
 Causes
 .Fn kevent
@@ -662,6 +674,46 @@ Cause the event to be triggered.
 On return,
 .Va fflags
 contains the users defined flags in the lower 24 bits.
+.It Dv EVFILT_USERMEM
+Waits for a value to change at an address in user memory.  The address
+is provided in
+.Va ident .
+The value it points to is compared with an expected value provided in
+.Va data ,
+and the event is triggered immediately if they are not equal.  Otherwise, it
+must be triggered explicitly using
+.Va NOTE_TRIGGER
+by any thread that wants to advertise that it has changed the value.  The event
+can be triggered by any process that has the same memory object mapped, even at
+a different address, unless
+.Va NOTE_USERMEM_PRIVATE
+is added to
+.Va fflags
+to prevent inter-process events.
+When
+.Va NOTE_TRIGGER
+is used in
+.Va fflags ,
+.Va flags
+should be set to
+.Va EV_ANON ,
+because this operation wakes waiters not only in the given kqueue object.
+.Bl -tag -width "Dv NOTE_UMTX_WAIT_PRIVATE"
+.It Dv NOTE_USERMEM_INT
+.Va ident
+points to an object the size of an integer.
+.It Dv NOTE_USERMEM_LONG
+.Va ident
+points to an object the size of a long.
+.It Dv NOTE_TRIGGER
+Cause the event to be triggered.  The number of waiters to wake up should
+be provided in
+.Va data .
+.It Dv NOTE_USERMEM_PRIVATE
+.Va ident
+is in a private namespace that is not shared with other processes that map
+the containing memory object.  Can be ORed with the preceding values.
+.El
 .El
 .Sh CANCELLATION BEHAVIOUR
 If

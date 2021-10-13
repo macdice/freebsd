@@ -212,6 +212,14 @@ function of the
 that the
 .Va knote
 was added to.
+.It Va f_anon
+The
+.Va f_anon
+function will be called for
+.Vt kevent
+objects with the
+.Dv EV_ANON
+flag, to perform actions that don't relate to a specific kqueue or knote.
 .El
 .Pp
 The function

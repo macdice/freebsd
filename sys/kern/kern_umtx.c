@@ -60,6 +60,7 @@ __FBSDID("$FreeBSD$");
 #include <sys/syscallsubr.h>
 #include <sys/taskqueue.h>
 #include <sys/time.h>
+#include <sys/event.h>
 #include <sys/eventhandler.h>
 #include <sys/umtx.h>
 #include <sys/umtxvar.h>
@@ -598,16 +599,22 @@ static int
 umtxq_signal_queue(struct umtx_key *key, int n_wake, int q)
 {
 	struct umtxq_queue *uh;
-	struct umtx_q *uq;
+	struct umtx_q *uq, *uq_temp;
 	int ret;
 
 	ret = 0;
 	UMTXQ_LOCKED_ASSERT(umtxq_getchain(key));
 	uh = umtxq_queue_lookup(key, q);
 	if (uh != NULL) {
-		while ((uq = TAILQ_FIRST(&uh->head)) != NULL) {
-			umtxq_remove_queue(uq, q);
-			wakeup(uq);
+		TAILQ_FOREACH_SAFE(uq, &uh->head, uq_link, uq_temp) {
+			if (uq->uq_flags & UQF_KQUEUE) {
+				if (uq->uq_flags & UQF_KQUEUE_ONCE)
+					umtxq_remove_queue(uq, q);
+				KNOTE_LOCKED(&uq->uq_klist, 1);
+			} else {
+				umtxq_remove_queue(uq, q);
+				wakeup(uq);
+			}
 			if (++ret >= n_wake)
 				return (ret);
 		}
@@ -5123,4 +5130,167 @@ umtx_thread_cleanup(struct thread *td)
 	umtx_cleanup_rb_list(td, td->td_rbp_list, &rb_inact, "priv ", compat32);
 	if (rb_inact != 0)
 		(void)umtx_handle_rb(td, rb_inact, NULL, true, compat32);
+}
+
+int
+filt_usermemattach(struct knote *kn)
+{
+	struct umtx_q *uq;
+	void *uaddr;
+	u_long tmp;
+	u_int tmp32;
+	int error;
+	bool is_private;
+
+	is_private = (kn->kn_sfflags & NOTE_USERMEM_PRIVATE) != 0;
+
+	uaddr = (void *)kn->kn_kevent.ident;
+
+	/* XXX stricter checking of acceptable fflags */
+	if ((kn->kn_sfflags & NOTE_USERMEM_INT) == 0 &&
+	    (kn->kn_sfflags & NOTE_USERMEM_LONG) == 0)
+		return (EINVAL);
+
+	/* Make a new umtx queue object and join the wait list. */
+	uq = umtxq_alloc();
+	if ((error = umtx_key_get(uaddr, TYPE_SIMPLE_WAIT,
+		is_private ? THREAD_SHARE : AUTO_SHARE, &uq->uq_key)) != 0) {
+		goto exit_free;
+	}
+
+	knlist_init_mtx(&uq->uq_klist, &umtxq_getchain(&uq->uq_key)->uc_lock);
+	uq->uq_flags |= UQF_KQUEUE;
+	if (kn->kn_flags & EV_ONESHOT)
+		uq->uq_flags |= UQF_KQUEUE_ONCE;
+	kn->kn_ptr.p_v = uq;
+
+	umtxq_lock(&uq->uq_key);
+	knlist_add(&uq->uq_klist, kn, 1);
+	umtxq_insert(uq);
+	umtxq_unlock(&uq->uq_key);
+
+	/* Fetch the user's value. */
+	if (kn->kn_sfflags & NOTE_USERMEM_INT) {
+		/* XXX also need to use this for _LONG for 32 bit process? */
+		error = fueword32(uaddr, &tmp32);
+		tmp = tmp32;
+	} else {
+		error = fueword(uaddr, &tmp);
+	}
+	if (error != 0) {
+		error = EFAULT;
+		goto exit_dequeue;
+	}
+
+	/* If value doesn't match, trigger immediately. */
+	if (tmp != (u_long) kn->kn_sdata) {
+		kn->kn_hookid = 1;
+		if (uq->uq_flags & UQF_KQUEUE_ONCE) {
+			umtxq_lock(&uq->uq_key);
+			umtxq_remove(uq);
+			umtxq_unlock(&uq->uq_key);
+		}
+	}
+
+	/* Otherwise we're now in the queue, waiting. */
+	return (0);
+
+exit_dequeue:
+	umtxq_lock(&uq->uq_key);
+	knlist_remove(&uq->uq_klist, kn, 1);
+	kn->kn_ptr.p_v = NULL;
+	umtxq_remove(uq);
+	umtxq_unlock(&uq->uq_key);
+
+	umtx_key_release(&uq->uq_key);
+
+exit_free:
+	umtxq_free(uq);
+
+	return (error);
+}
+
+void
+filt_usermemdetach(struct knote *kn)
+{
+	struct umtx_q *uq;
+
+	uq = kn->kn_ptr.p_v;
+
+	umtxq_lock(&uq->uq_key);
+	knlist_remove(&uq->uq_klist, kn, 1);
+	kn->kn_ptr.p_v = NULL;
+	umtxq_remove(uq);
+	umtxq_unlock(&uq->uq_key);
+
+	umtx_key_release(&uq->uq_key);
+
+	umtxq_free(uq);
+}
+
+int
+filt_usermem(struct knote *kn, long hint)
+{
+	if (hint)
+		kn->kn_hookid = 1;
+
+	return (kn->kn_hookid);
+}
+
+void
+filt_usermemtouch(struct knote *kn, struct kevent *kev, u_long type)
+{
+	switch (type) {
+	case EVENT_REGISTER:
+		/*
+		 * Re-adding the same ident.
+		 *
+		 * XXX If data and fflags haven't changed, there's nothing to
+		 * do as we're already in the umtx queue and anyone who changed
+		 * the value should have woken us.  Otherwise, we'd need to
+		 * compare the value, but we can't here: we hold a
+		 * non-sleepable lock, but reading userspace memory acquires a
+		 * sleepable lock.  So in that case, trigger immediately and
+		 * let the user deal with it.
+		 */
+		if (kev->data != kn->kn_sdata || kev->fflags != kn->kn_sfflags) {
+			struct umtx_q *uq;
+
+			kn->kn_hookid = 1;
+			kn->kn_sdata = kev->data;
+			kn->kn_fflags = kn->kn_sfflags;
+
+			uq = kn->kn_ptr.p_v;
+			if (uq->uq_flags & UQF_KQUEUE_ONCE)
+				umtxq_remove(uq);
+		}
+		break;
+	case EVENT_PROCESS:
+		*kev = kn->kn_kevent;
+		kn->kn_hookid = 0;
+		break;
+	default:
+		panic("filt_usermemtouch() - invalid type (%ld)", type);
+		break;
+	}
+}
+
+int
+filt_usermemanon(struct kevent *kev)
+{
+	int is_private;
+	void *uaddr;
+	int n_wake;
+	int error;
+
+	if (kev->fflags != NOTE_TRIGGER)
+		return (EINVAL);
+
+	is_private = (kev->fflags & NOTE_USERMEM_PRIVATE) != 0;
+	uaddr = (void *)kev->ident;
+	n_wake = kev->data;
+
+	error = kern_umtx_wake(curthread, uaddr, n_wake, is_private);
+
+	return (error);
 }

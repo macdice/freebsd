@@ -34,6 +34,8 @@
 #include <sys/_types.h>
 #include <sys/queue.h>
 
+#define KQUEUE_FD_ANON		(-2)	/* anonymous temporary kqueue */
+
 #define EVFILT_READ		(-1)
 #define EVFILT_WRITE		(-2)
 #define EVFILT_AIO		(-3)	/* attached to aio requests */
@@ -47,7 +49,8 @@
 #define EVFILT_USER		(-11)	/* User events */
 #define EVFILT_SENDFILE		(-12)	/* attached to sendfile requests */
 #define EVFILT_EMPTY		(-13)	/* empty send socket buf */
-#define EVFILT_SYSCOUNT		13
+#define EVFILT_USERMEM		(-14)	/* attached to value in user memory */
+#define EVFILT_SYSCOUNT		14
 
 #if defined(__STDC_VERSION__) && __STDC_VERSION__ >= 199901L
 #define	EV_SET(kevp_, a, b, c, d, e, f) do {	\
@@ -145,6 +148,7 @@ struct freebsd11_kevent32 {
 #define EV_CLEAR	0x0020		/* clear event state after reporting */
 #define EV_RECEIPT	0x0040		/* force EV_ERROR on success, data=0 */
 #define EV_DISPATCH	0x0080		/* disable event after reporting */
+#define EV_ANON		0x0400		/* anonymous action (not specific kq) */
 
 #define EV_SYSFLAGS	0xF000		/* reserved by system */
 #define	EV_DROP		0x1000		/* note should be dropped */
@@ -218,6 +222,11 @@ struct freebsd11_kevent32 {
 #define NOTE_NSECONDS		0x00000008	/* data is nanoseconds */
 #define	NOTE_ABSTIME		0x00000010	/* timeout is absolute */
 
+/* addition flags for EVFILT_USERMEM */
+#define NOTE_USERMEM_INT	0x00000001	/* ident is pointer to int */
+#define NOTE_USERMEM_LONG	0x00000002	/* ident is pointer to long */
+#define NOTE_USERMEM_PRIVATE	0x00000004	/* no inter-process events */
+
 struct knote;
 SLIST_HEAD(klist, knote);
 struct kqueue;
@@ -267,6 +276,7 @@ struct filterops {
 	void	(*f_detach)(struct knote *kn);
 	int	(*f_event)(struct knote *kn, long hint);
 	void	(*f_touch)(struct knote *kn, struct kevent *kev, u_long type);
+	int	(*f_anon)(struct kevent *kev);
 };
 
 /*

@@ -138,4 +138,13 @@ int _umtx_op(void *obj, int op, u_long val, void *uaddr, void *uaddr2);
 
 __END_DECLS
 
+#ifdef _KERNEL
+struct knote;
+int filt_usermemattach(struct knote *kn);
+void filt_usermemdetach(struct knote *kn);
+int filt_usermem(struct knote *kn, long hint);
+void filt_usermemtouch(struct knote *kn, struct kevent *touch, u_long type);
+int filt_usermemanon(struct kevent *kev);
+#endif
+
 #endif /* !_SYS_UMTX_H_ */
