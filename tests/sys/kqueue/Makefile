@@ -6,6 +6,7 @@ TESTSDIR=	${TESTSBASE}/sys/kqueue
 BINDIR=		${TESTSDIR}
 
 ATF_TESTS_C+=	kqueue_peek_signal
+ATF_TESTS_C+=	kqueue_umtx
 
 NETBSD_ATF_TESTS_C=	proc1_test
 # XXX: fails `ke.fflags & NOTE_TRACKERR` invariant

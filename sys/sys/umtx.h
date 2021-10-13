@@ -138,4 +138,11 @@ int _umtx_op(void *obj, int op, u_long val, void *uaddr, void *uaddr2);
 
 __END_DECLS
 
+#ifdef _KERNEL
+struct knote;
+int filt_umtxattach(struct knote *kn);
+void filt_umtxdetach(struct knote *kn);
+int filt_umtx(struct knote *kn, long hint);
+#endif
+
 #endif /* !_SYS_UMTX_H_ */

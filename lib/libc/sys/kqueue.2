@@ -662,6 +662,27 @@ Cause the event to be triggered.
 On return,
 .Va fflags
 contains the users defined flags in the lower 24 bits.
+.It Dv EVFILT_UMTX
+Waits for a user event identified by an address.  The value at
+.Va ident
+is compared to
+.Va data ,
+and the event is triggered immediately if it is not.  Otherwise,
+it is triggered by a call to
+.Xr _umtx_op 2 .
+Events of this type are always one-shot.
+.Bl -tag -width "Dv NOTE_UMTX_WAIT_PRIVATE"
+.It Dv NOTE_UMTX_WAIT_UINT
+.Va ident
+points to an unsigned integer.
+.It Dv NOTE_UMTX_WAIT_ULONG
+.Va ident
+points to an unsigned long.
+.It Dv NOTE_UMTX_WAIT_PRIVATE
+.Va ident
+is in a private namespace that is not shared with other processes that map
+the containing memory object.
+.El
 .El
 .Sh CANCELLATION BEHAVIOUR
 If

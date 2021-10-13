@@ -60,6 +60,7 @@ __FBSDID("$FreeBSD$");
 #include <sys/syscallsubr.h>
 #include <sys/taskqueue.h>
 #include <sys/time.h>
+#include <sys/event.h>
 #include <sys/eventhandler.h>
 #include <sys/umtx.h>
 #include <sys/umtxvar.h>
@@ -607,7 +608,12 @@ umtxq_signal_queue(struct umtx_key *key, int n_wake, int q)
 	if (uh != NULL) {
 		while ((uq = TAILQ_FIRST(&uh->head)) != NULL) {
 			umtxq_remove_queue(uq, q);
-			wakeup(uq);
+			if (uq->uq_flags & UQF_KQUEUE) {
+				KNOTE_LOCKED(&uq->uq_klist, 1);
+				knlist_clear(&uq->uq_klist, 1);
+			} else {
+				wakeup(uq);
+			}
 			if (++ret >= n_wake)
 				return (ret);
 		}
@@ -5123,4 +5129,107 @@ umtx_thread_cleanup(struct thread *td)
 	umtx_cleanup_rb_list(td, td->td_rbp_list, &rb_inact, "priv ", compat32);
 	if (rb_inact != 0)
 		(void)umtx_handle_rb(td, rb_inact, NULL, true, compat32);
+}
+
+int
+filt_umtxattach(struct knote *kn)
+{
+	struct umtx_q *uq;
+	void *addr;
+	u_long tmp;
+	u_int tmp32;
+	int error;
+	bool is_private;
+
+	if ((kn->kn_sfflags & NOTE_UMTX_WAIT_UINT) == 0 &&
+	    (kn->kn_sfflags & NOTE_UMTX_WAIT_ULONG) == 0)
+		return (EINVAL);
+
+	is_private = (kn->kn_sfflags & NOTE_UMTX_WAIT_PRIVATE) != 0;
+
+	addr = (void *)kn->kn_kevent.ident;
+
+	kn->kn_flags |= EV_ONESHOT;
+
+	/* Make a new umtx queue object and join the wait list. */
+	uq = umtxq_alloc();
+	if ((error = umtx_key_get(addr, TYPE_SIMPLE_WAIT,
+		is_private ? THREAD_SHARE : AUTO_SHARE, &uq->uq_key)) != 0) {
+		goto exit_free;
+	}
+
+	knlist_init_mtx(&uq->uq_klist, &umtxq_getchain(&uq->uq_key)->uc_lock);
+
+	umtxq_lock(&uq->uq_key);
+	knlist_add(&uq->uq_klist, kn, 1);
+	uq->uq_flags |= UQF_KQUEUE;
+	kn->kn_ptr.p_v = uq;
+	umtxq_insert(uq);
+	umtxq_unlock(&uq->uq_key);
+
+	/* Fetch the user's value. */
+	if (kn->kn_sfflags & NOTE_UMTX_WAIT_UINT) {
+		/* XXX also need to use this for _ULONG for 32 bit process? */
+		error = fueword32(addr, &tmp32);
+		tmp = tmp32;
+	} else {
+		error = fueword(addr, &tmp);
+	}
+	if (error != 0) {
+		error = EFAULT;
+		goto exit_dequeue;
+	}
+
+	/* If value doesn't match, trigger immediately by dequeuing. */
+	if (tmp != (u_long) kn->kn_sdata) {
+		umtxq_lock(&uq->uq_key);
+		umtxq_remove(uq);
+		umtxq_unlock(&uq->uq_key);
+	}
+
+	/* Otherwise we're now in the queue, waiting. */
+	return (0);
+
+exit_dequeue:
+	umtxq_lock(&uq->uq_key);
+	knlist_remove(&uq->uq_klist, kn, 1);
+	kn->kn_ptr.p_v = NULL;
+	umtxq_remove(uq);
+	umtxq_unlock(&uq->uq_key);
+
+	umtx_key_release(&uq->uq_key);
+
+exit_free:
+	umtxq_free(uq);
+
+	return (error);
+}
+
+void
+filt_umtxdetach(struct knote *kn)
+{
+	struct umtx_q *uq;
+
+	uq = kn->kn_ptr.p_v;
+
+	umtxq_lock(&uq->uq_key);
+	knlist_remove(&uq->uq_klist, kn, 1);
+	kn->kn_ptr.p_v = NULL;
+	umtxq_remove(uq);
+	umtxq_unlock(&uq->uq_key);
+
+	umtx_key_release(&uq->uq_key);
+
+	umtxq_free(uq);
+}
+
+int
+filt_umtx(struct knote *kn, long hint)
+{
+	struct umtx_q *uq;
+
+	uq = kn->kn_ptr.p_v;
+
+	/* If not in umtx queue, then triggered. */
+	return ((uq->uq_flags & UQF_UMTXQ) ? 0 : 1);
 }

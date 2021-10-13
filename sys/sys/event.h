@@ -47,7 +47,8 @@
 #define EVFILT_USER		(-11)	/* User events */
 #define EVFILT_SENDFILE		(-12)	/* attached to sendfile requests */
 #define EVFILT_EMPTY		(-13)	/* empty send socket buf */
-#define EVFILT_SYSCOUNT		13
+#define EVFILT_UMTX		(-14)	/* user space mutexes */
+#define EVFILT_SYSCOUNT		14
 
 #if defined(__STDC_VERSION__) && __STDC_VERSION__ >= 199901L
 #define	EV_SET(kevp_, a, b, c, d, e, f) do {	\
@@ -217,6 +218,11 @@ struct freebsd11_kevent32 {
 #define NOTE_USECONDS		0x00000004	/* data is microseconds */
 #define NOTE_NSECONDS		0x00000008	/* data is nanoseconds */
 #define	NOTE_ABSTIME		0x00000010	/* timeout is absolute */
+
+/* addition flags for EVFILT_UMTX */
+#define NOTE_UMTX_WAIT_UINT	0x00000001	/* ident is pointer to uint */
+#define NOTE_UMTX_WAIT_ULONG	0x00000002	/* ident is pointer to ulong */
+#define NOTE_UMTX_WAIT_PRIVATE	0x00000004	/* process-private */
 
 struct knote;
 SLIST_HEAD(klist, knote);

@@ -70,6 +70,7 @@ __FBSDID("$FreeBSD$");
 #include <sys/syscallsubr.h>
 #include <sys/taskqueue.h>
 #include <sys/uio.h>
+#include <sys/umtx.h>
 #include <sys/user.h>
 #ifdef KTRACE
 #include <sys/ktrace.h>
@@ -202,6 +203,11 @@ static struct filterops user_filtops = {
 	.f_detach = filt_userdetach,
 	.f_event = filt_user,
 	.f_touch = filt_usertouch,
+};
+static struct filterops umtx_filtops = {
+	.f_attach = filt_umtxattach,
+	.f_detach = filt_umtxdetach,
+	.f_event = filt_umtx,
 };
 
 static uma_zone_t	knote_zone;
@@ -361,6 +367,7 @@ static struct {
 	{ &user_filtops, 1 },			/* EVFILT_USER */
 	{ &null_filtops },			/* EVFILT_SENDFILE */
 	{ &file_filtops, 1 },                   /* EVFILT_EMPTY */
+	{ &umtx_filtops, 1 },                   /* EVFILT_UMTX */
 };
 
 /*
