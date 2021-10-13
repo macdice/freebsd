@@ -120,6 +120,7 @@ struct umtx_q {
 	/* Umtx flags. */
 	int			uq_flags;
 #define UQF_UMTXQ	0x0001
+#define UQF_KQUEUE	0x0002
 
 	/* Futex bitset mask */
 	u_int			uq_bitset;
@@ -148,6 +149,9 @@ struct umtx_q {
 
 	/* The queue we on */
 	struct umtxq_queue	*uq_cur_queue;
+
+	/* List to hold knote, if waiting with kevent. */
+	struct knlist		uq_klist;
 };
 
 TAILQ_HEAD(umtxq_head, umtx_q);

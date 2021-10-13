@@ -70,6 +70,7 @@ __FBSDID("$FreeBSD$");
 #include <sys/syscallsubr.h>
 #include <sys/taskqueue.h>
 #include <sys/uio.h>
+#include <sys/umtx.h>
 #include <sys/user.h>
 #ifdef KTRACE
 #include <sys/ktrace.h>
@@ -202,6 +203,13 @@ static struct filterops user_filtops = {
 	.f_detach = filt_userdetach,
 	.f_event = filt_user,
 	.f_touch = filt_usertouch,
+};
+static struct filterops usermem_filtops = {
+	.f_attach = filt_usermemattach,
+	.f_detach = filt_usermemdetach,
+	.f_event = filt_usermem,
+	.f_touch = filt_usermemtouch,
+	.f_anonymous = filt_usermemanonymous,
 };
 
 static uma_zone_t	knote_zone;
@@ -361,6 +369,7 @@ static struct {
 	{ &user_filtops, 1 },			/* EVFILT_USER */
 	{ &null_filtops },			/* EVFILT_SENDFILE */
 	{ &file_filtops, 1 },                   /* EVFILT_EMPTY */
+	{ &usermem_filtops, 1 },                /* EVFILT_USERMEM */
 };
 
 /*
@@ -1293,6 +1302,11 @@ kern_kevent(struct thread *td, int fd, int nchanges, int nevents,
 	struct file *fp;
 	int error;
 
+	if (fd == -1) {
+		error = kern_kevent_anonymous(td, nchanges, nevents, k_ops, timeout);
+		return (error);
+	}
+
 	cap_rights_init_zero(&rights);
 	if (nchanges > 0)
 		cap_rights_set_one(&rights, CAP_KQUEUE_CHANGE);
@@ -1372,15 +1386,16 @@ kern_kevent_fp(struct thread *td, struct file *fp, int nchanges, int nevents,
  * used to perform one-shot polling, similar to poll() and select().
  */
 int
-kern_kevent_anonymous(struct thread *td, int nevents,
-    struct kevent_copyops *k_ops)
+kern_kevent_anonymous(struct thread *td, int nchanges, int nevents,
+    struct kevent_copyops *k_ops, const struct timespec *timeout)
 {
 	struct kqueue kq = {};
 	int error;
 
+	printf("kern_kevent_anonymous\n");
 	kqueue_init(&kq);
 	kq.kq_refcnt = 1;
-	error = kqueue_kevent(&kq, td, nevents, nevents, k_ops, NULL);
+	error = kqueue_kevent(&kq, td, nchanges, nevents, k_ops, timeout);
 	kqueue_drain(&kq, td);
 	kqueue_destroy(&kq);
 	return (error);
@@ -1499,6 +1514,17 @@ kqueue_register(struct kqueue *kq, struct kevent *kev, struct thread *td,
 	fops = kqueue_fo_find(filt);
 	if (fops == NULL)
 		return EINVAL;
+
+	/* Anonymous actions have no kqueue or knote */
+	if (kev->flags & EV_ANONYMOUS) {
+		tkn = NULL;
+		if (fops->f_anonymous == NULL) {
+			error = EINVAL;
+			goto done;
+		}
+		error = fops->f_anonymous(kev);
+		goto done;
+	}
 
 	if (kev->flags & EV_ADD) {
 		/* Reject an invalid flag pair early */
