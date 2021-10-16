@@ -4781,6 +4781,7 @@ for ac_header in \
 	paths.h \
 	poll.h \
 	ranlib.h \
+	sys/event.h \
 	sys/mman.h \
 	sys/select.h \
 	sys/socket.h \

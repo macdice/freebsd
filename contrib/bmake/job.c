@@ -132,14 +132,21 @@
 #include "wait.h"
 
 #include <errno.h>
+
+#if defined(HAVE_SYS_EVENT_H)
+#include <sys/event.h>
+#define USE_KQUEUE
+#else
 #if !defined(USE_SELECT) && defined(HAVE_POLL_H)
 #include <poll.h>
+#define USE_POLL
 #else
 #ifndef USE_SELECT			/* no poll.h */
 # define USE_SELECT
 #endif
 #if defined(HAVE_SYS_SELECT_H)
 # include <sys/select.h>
+#endif
 #endif
 #endif
 #include <signal.h>
@@ -439,10 +446,16 @@ static char *shell_freeIt = NULL; /* Allocated memory for custom .SHELL */
 
 static Job *job_table;		/* The structures that describe them */
 static Job *job_table_end;	/* job_table + maxJobs */
-static unsigned int wantToken;	/* we want a token */
 static bool lurking_children = false;
 static bool make_suspended = false; /* Whether we've seen a SIGTSTP (etc) */
 
+#if defined(USE_KQUEUE)
+/*
+ * A kqueue for descriptors of pipes connected to
+ * the output channels of children
+ */
+static int kq;
+#else
 /*
  * Set of descriptors of pipes connected to
  * the output channels of children
@@ -450,6 +463,9 @@ static bool make_suspended = false; /* Whether we've seen a SIGTSTP (etc) */
 static struct pollfd *fds = NULL;
 static Job **jobByFdIndex = NULL;
 static nfds_t fdsLen = 0;
+static unsigned int wantToken;	/* we want a token */
+#endif
+
 static void watchfd(Job *);
 static void clearfd(Job *);
 static bool readyfd(Job *);
@@ -2103,9 +2119,61 @@ Job_CatchOutput(void)
 	int nready;
 	Job *job;
 	unsigned int i;
+#if defined(USE_KQUEUE)
+	struct kevent events[32];
+#endif
 
 	(void)fflush(stdout);
 
+#if defined(USE_KQUEUE)
+	do {
+		struct timespec timeout = {
+			.tv_sec = POLL_MSEC / 1000,
+			.tv_nsec = (POLL_MSEC % 1000) * 1000000
+		};
+
+		nready = kevent(kq,
+				NULL,
+				0,
+				events,
+				sizeof(events) / sizeof(events[0]),
+				&timeout);
+
+	} while (nready < 0 && errno == EINTR);
+
+	if (nready < 0)
+		Punt("kevent: %s", strerror(errno));
+
+	for (i = 0; i < nready; ++i) {
+		job = events[i].udata;
+
+		if (job == &childExitJob) {
+			char token = 0;
+			ssize_t count;
+			count = read(childExitJob.inPipe, &token, 1);
+			if (count == 1) {
+				if (token == DO_JOB_RESUME[0])
+					/*
+					 * Complete relay requested from our SIGCONT
+					 * handler
+					 */
+					JobRestartJobs();
+			} else if (count == 0)
+				Punt("unexpected eof on token pipe");
+			else
+				Punt("token pipe read: %s", strerror(errno));
+		} else {
+			if (job->status == JOB_ST_RUNNING)
+				CollectOutput(job, false);
+#if defined(USE_FILEMON) && !defined(USE_FILEMON_DEV)
+			if (useMeta && job->inPollfd != events[i].ident) {
+				meta_job_event(job);
+			}
+#endif
+		}
+	}
+	Job_CatchChildren();
+#else
 	/* The first fd in the list is the job token pipe */
 	do {
 		nready = poll(fds + 1 - wantToken, fdsLen - 1 + wantToken,
@@ -2158,6 +2226,7 @@ Job_CatchOutput(void)
 		if (--nready == 0)
 			return;
 	}
+#endif
 }
 
 /*
@@ -2250,6 +2319,20 @@ AddSig(int sig, SignalProc handler)
 	}
 }
 
+static void
+setWantToken(int x)
+{
+#if defined(USE_KQUEUE)
+	struct kevent kev;
+
+	EV_SET(&kev, tokenWaitJob.inPipe, EVFILT_READ, x ? EV_ENABLE : EV_DISABLE, 0, 0, &tokenWaitJob);
+	if (kevent(kq, &kev, 1, NULL, 0, NULL) < 0)
+		Punt("kevent change failed");
+#else
+	wantToken = x;
+#endif
+}
+
 /* Initialize the process module. */
 void
 Job_Init(void)
@@ -2259,7 +2342,6 @@ Job_Init(void)
 	job_table = bmake_malloc((size_t)opts.maxJobs * sizeof *job_table);
 	memset(job_table, 0, (size_t)opts.maxJobs * sizeof *job_table);
 	job_table_end = job_table + opts.maxJobs;
-	wantToken = 0;
 	caught_sigchld = 0;
 
 	aborting = ABORT_NONE;
@@ -2294,6 +2376,11 @@ Job_Init(void)
 
 	JobCreatePipe(&childExitJob, 3);
 
+#if defined(USE_KQUEUE)
+	kq = kqueue();
+	if (kq < 0)
+		Punt("could not create kqueue");
+#else
 	{
 		/* Preallocate enough for the maximum number of jobs. */
 		size_t nfds = (npseudojobs + (size_t)opts.maxJobs) *
@@ -2301,10 +2388,13 @@ Job_Init(void)
 		fds = bmake_malloc(sizeof *fds * nfds);
 		jobByFdIndex = bmake_malloc(sizeof *jobByFdIndex * nfds);
 	}
+#endif
 
 	/* These are permanent entries and take slots 0 and 1 */
 	watchfd(&tokenWaitJob);
 	watchfd(&childExitJob);
+
+	setWantToken(0);
 
 	sigemptyset(&caught_signals);
 	/*
@@ -2752,6 +2842,20 @@ JobRestartJobs(void)
 static void
 watchfd(Job *job)
 {
+#if defined(USE_KQUEUE)
+	struct kevent kev;
+
+	EV_SET(&kev, job->inPipe, EVFILT_READ, EV_ADD | EV_ENABLE, 0, 0, job);
+	if (kevent(kq, &kev, 1, NULL, 0, NULL) < 0)
+		Punt("kevent change failed");
+#if defined(USE_FILEMON) && !defined(USE_FILEMON_DEV)
+	if (useMeta && meta_job_fd(job) != -1) {
+		EV_SET(&kev, meta_job_fd(job), EVFILT_READ, EV_ADD | EV_ENABLE, 0, 0, job);
+		if (kevent(kq, &kev, 1, NULL, 0, NULL) < 0)
+			Punt("kevent change failed");
+	}
+#endif
+#else
 	if (job->inPollfd != NULL)
 		Punt("Watching watched job");
 
@@ -2768,11 +2872,26 @@ watchfd(Job *job)
 		fdsLen++;
 	}
 #endif
+#endif
 }
 
 static void
 clearfd(Job *job)
 {
+#if defined(USE_KQUEUE)
+	struct kevent kev;
+
+	EV_SET(&kev, job->inPipe, EVFILT_READ, EV_DELETE, 0, 0, job);
+	if (kevent(kq, &kev, 1, NULL, 0, NULL) < 0)
+		Punt("kevent change failed");
+#if defined(USE_FILEMON) && !defined(USE_FILEMON_DEV)
+	if (useMeta && meta_job_fd(job) != -1) {
+		EV_SET(&kev, meta_job_fd(job), EVFILT_READ, EV_DELETE, 0, 0, job);
+		if (kevent(kq, &kev, 1, NULL, 0, NULL) < 0)
+			Punt("kevent change failed");
+	}
+#endif
+#else
 	size_t i;
 	if (job->inPollfd == NULL)
 		Punt("Unwatching unwatched job");
@@ -2805,8 +2924,10 @@ clearfd(Job *job)
 #endif
 	}
 	job->inPollfd = NULL;
+#endif
 }
 
+#if defined(USE_SELECT) || defined(USE_POLL)
 static bool
 readyfd(Job *job)
 {
@@ -2814,6 +2935,7 @@ readyfd(Job *job)
 		Punt("Polling unwatched job");
 	return (job->inPollfd->revents & POLLIN) != 0;
 }
+#endif
 
 /*
  * Put a token (back) into the job pipe.
@@ -2918,7 +3040,7 @@ Job_TokenWithdraw(void)
 	char tok, tok1;
 	ssize_t count;
 
-	wantToken = 0;
+	setWantToken(0);
 	DEBUG3(JOB, "Job_TokenWithdraw(%d): aborting %d, running %d\n",
 	    getpid(), aborting, jobTokensRunning);
 
@@ -2933,7 +3055,7 @@ Job_TokenWithdraw(void)
 			Fatal("job pipe read: %s", strerror(errno));
 		}
 		DEBUG1(JOB, "(%d) blocked for token\n", getpid());
-		wantToken = 1;
+		setWantToken(1);
 		return false;
 	}
 
