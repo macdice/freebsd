@@ -112,6 +112,13 @@ typedef struct aiocb {
 #define	aio_iov	aio_buf			/* I/O scatter/gather list */
 #define	aio_iovcnt	aio_nbytes	/* Length of aio_iov */
 
+/*
+ * A value used in aio_sigevent.sigev_kevent_flags to activate asynchronous
+ * reaping of completion events, with the result stored in kevent's data member
+ * and EV_ERROR flag.
+ */
+#define AIO_KEVENT_FLAG_REAP 0x4000	/* == EV_FLAG2 */
+
 #ifdef _KERNEL
 
 typedef void aio_cancel_fn_t(struct kaiocb *);
@@ -150,6 +157,7 @@ struct kaiocb {
 	uint64_t seqno;			/* (*) job number */
 	aio_cancel_fn_t *cancel_fn;	/* (a) backend cancel function */
 	aio_handle_fn_t *handle_fn;	/* (c) backend handle function */
+	struct aiocb_ops *ops;		/* (a) ops for writing to user space */
 	union {				/* Backend-specific data fields */
 		struct {		/* BIO backend */
 			int	nbio;	/* Number of remaining bios */

@@ -27,7 +27,7 @@
 .\"
 .\" $FreeBSD$
 .\"
-.Dd January 2, 2021
+.Dd December 5, 2021
 .Dt AIO 4
 .Os
 .Sh NAME
@@ -170,6 +170,7 @@ field should contain the descriptor of the kqueue that the event should be attac
 to, its
 .Va sigev_notify_kevent_flags
 field may contain
+.Dv AIO_KEVENT_FLAG_REAP ,
 .Dv EV_ONESHOT ,
 .Dv EV_CLEAR , and/or
 .Dv EV_DISPATCH , and its
@@ -185,7 +186,29 @@ The posted kevent will contain:
 .It Va udata Ta
 value stored in
 .Va aio_sigevent.sigev_value
+.It Va data Ta
+if
+.Dv AIO_KEVENT_FLAG_REAP
+is specified,
+error or return status, depending on
+.Dv EV_ERROR
+flag
 .El
+.Pp
+If
+.Dv AIO_KEVENT_FLAG_REAP
+is specified in
+.Va sigev_notify_kevent_flags ,
+then it is not necessary to call
+.Xr aio_error 2
+and
+.Xr aio_return 2
+in the common case.
+Note that it is still necessary to query the status
+of individual I/O operations explicitly with
+.Xr aio_error 2
+after a failed call to
+.Xr lio_listio 2 .
 .Pp
 For
 .Dv SIGEV_SIGNO

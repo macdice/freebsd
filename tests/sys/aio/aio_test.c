@@ -1980,6 +1980,142 @@ ATF_TC_BODY(aio_threadexit, tc)
 	close(fd);
 }
 
+ATF_TC_WITHOUT_HEAD(aio_kqueue_noreap);
+ATF_TC_BODY(aio_kqueue_noreap, tc)
+{
+	int kq;
+	int pipe_fds[2];
+	struct aiocb iocb;
+	struct aiocb *piocb;
+	char buffer[] = "hello world";
+	struct kevent kev;
+	struct timespec timeout = {0, 0};
+
+	ATF_REQUIRE_KERNEL_MODULE("aio");
+	ATF_REQUIRE_UNSAFE_AIO();
+
+	kq = kqueue();
+	ATF_REQUIRE(kq >= 0);
+	ATF_REQUIRE_EQ(0, pipe(pipe_fds));
+
+	/* Submit a write that will succeed. */
+	memset(&iocb, 0, sizeof(iocb));
+	iocb.aio_sigevent.sigev_notify = SIGEV_KEVENT;
+	iocb.aio_sigevent.sigev_notify_kqueue = kq;
+	iocb.aio_fildes = pipe_fds[1];
+	iocb.aio_buf = buffer;
+	iocb.aio_nbytes = sizeof(buffer);
+	ATF_REQUIRE_EQ(0, aio_write(&iocb));
+
+	/* Wait for completion. */
+	ATF_REQUIRE_EQ(1, kevent(kq, NULL, 0, &kev, 1, NULL));
+	ATF_REQUIRE_EQ((uintptr_t) &iocb, kev.ident);
+	ATF_REQUIRE_EQ(0, kev.flags & EV_ERROR);
+	ATF_REQUIRE_EQ(0, kev.data);		/* undocumented */
+	ATF_REQUIRE_EQ(0, aio_error(&iocb));
+
+	/* Reap the IO explicitly. */
+	ATF_REQUIRE_EQ(sizeof(buffer), aio_waitcomplete(&piocb, &timeout));
+	ATF_REQUIRE_EQ(&iocb, piocb);
+
+	/* Nothing left in the kernel's queue. */
+	ATF_REQUIRE_EQ(-1, aio_waitcomplete(&piocb, &timeout));
+	ATF_REQUIRE_EQ(NULL, piocb);
+
+	/* Submit a write that will fail. */
+	close(pipe_fds[0]);
+	memset(&iocb, 0, sizeof(iocb));
+	iocb.aio_sigevent.sigev_notify = SIGEV_KEVENT;
+	iocb.aio_sigevent.sigev_notify_kqueue = kq;
+	iocb.aio_fildes = pipe_fds[1];
+	iocb.aio_buf = buffer;
+	iocb.aio_nbytes = sizeof(buffer);
+	ATF_REQUIRE_EQ(0, aio_write(&iocb));
+
+	/* Wait for completion. */
+	ATF_REQUIRE_EQ(1, kevent(kq, NULL, 0, &kev, 1, NULL));
+	ATF_REQUIRE_EQ((uintptr_t) &iocb, kev.ident);
+	ATF_REQUIRE_EQ(0, kev.flags & EV_ERROR);
+	ATF_REQUIRE_EQ(EPIPE, kev.data);	/* undocumented */
+	ATF_REQUIRE_EQ(EPIPE, aio_error(&iocb));
+
+	/* Reap the IO explicitly. */
+	ATF_REQUIRE_EQ(-1, aio_waitcomplete(&piocb, &timeout));
+	ATF_REQUIRE_EQ(&iocb, piocb);
+	ATF_REQUIRE_EQ(EPIPE, errno);
+
+	/* Nothing left in the kernel's queue. */
+	ATF_REQUIRE_EQ(-1, aio_waitcomplete(&piocb, &timeout));
+	ATF_REQUIRE_EQ(NULL, piocb);
+
+	close(pipe_fds[1]);
+	close(kq);
+}
+
+ATF_TC_WITHOUT_HEAD(aio_kqueue_reap);
+ATF_TC_BODY(aio_kqueue_reap, tc)
+{
+	int kq;
+	int pipe_fds[2];
+	struct aiocb iocb;
+	struct aiocb *piocb;
+	char buffer[] = "hello world";
+	struct kevent kev;
+	struct timespec timeout = {0, 0};
+
+	ATF_REQUIRE_KERNEL_MODULE("aio");
+	ATF_REQUIRE_UNSAFE_AIO();
+
+	kq = kqueue();
+	ATF_REQUIRE(kq >= 0);
+	ATF_REQUIRE_EQ(0, pipe(pipe_fds));
+
+	/* Submit a write that will succeed. */
+	memset(&iocb, 0, sizeof(iocb));
+	iocb.aio_sigevent.sigev_notify = SIGEV_KEVENT;
+	iocb.aio_sigevent.sigev_notify_kqueue = kq;
+	iocb.aio_sigevent.sigev_notify_kevent_flags = AIO_KEVENT_FLAG_REAP;
+	iocb.aio_fildes = pipe_fds[1];
+	iocb.aio_buf = buffer;
+	iocb.aio_nbytes = sizeof(buffer);
+	ATF_REQUIRE_EQ(0, aio_write(&iocb));
+
+	/* Wait for completion. */
+	ATF_REQUIRE_EQ(1, kevent(kq, NULL, 0, &kev, 1, NULL));
+	ATF_REQUIRE_EQ((uintptr_t) &iocb, kev.ident);
+	ATF_REQUIRE_EQ(0, kev.flags & EV_ERROR);
+	ATF_REQUIRE_EQ(sizeof(buffer), kev.data);
+	ATF_REQUIRE_EQ(0, aio_error(&iocb));
+
+	/* Nothing left in the kernel's queue. */
+	ATF_REQUIRE_EQ(-1, aio_waitcomplete(&piocb, &timeout));
+	ATF_REQUIRE_EQ(NULL, piocb);
+
+	/* Submit a write that will fail. */
+	close(pipe_fds[0]);
+	memset(&iocb, 0, sizeof(iocb));
+	iocb.aio_sigevent.sigev_notify = SIGEV_KEVENT;
+	iocb.aio_sigevent.sigev_notify_kqueue = kq;
+	iocb.aio_sigevent.sigev_notify_kevent_flags = AIO_KEVENT_FLAG_REAP;
+	iocb.aio_fildes = pipe_fds[1];
+	iocb.aio_buf = buffer;
+	iocb.aio_nbytes = sizeof(buffer);
+	ATF_REQUIRE_EQ(0, aio_write(&iocb));
+
+	/* Wait for completion. */
+	ATF_REQUIRE_EQ(1, kevent(kq, NULL, 0, &kev, 1, NULL));
+	ATF_REQUIRE_EQ((uintptr_t) &iocb, kev.ident);
+	ATF_REQUIRE_EQ(EV_ERROR, kev.flags & EV_ERROR);
+	ATF_REQUIRE_EQ(EPIPE, kev.data);
+	ATF_REQUIRE_EQ(EPIPE, aio_error(&iocb));
+
+	/* Nothing left in the kernel's queue. */
+	ATF_REQUIRE_EQ(-1, aio_waitcomplete(&piocb, &timeout));
+	ATF_REQUIRE_EQ(NULL, piocb);
+
+	close(pipe_fds[1]);
+	close(kq);
+}
 
 ATF_TP_ADD_TCS(tp)
 {
@@ -2038,6 +2174,8 @@ ATF_TP_ADD_TCS(tp)
 	ATF_TP_ADD_TC(tp, vectored_socket_poll);
 	ATF_TP_ADD_TC(tp, vectored_thread);
 	ATF_TP_ADD_TC(tp, aio_threadexit);
+	ATF_TP_ADD_TC(tp, aio_kqueue_noreap);
+	ATF_TP_ADD_TC(tp, aio_kqueue_reap);
 
 	return (atf_no_error());
 }
