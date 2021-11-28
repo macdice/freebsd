@@ -184,7 +184,7 @@ readindir(struct vnode *vp, e2fs_lbn_t lbn, e2fs_daddr_t daddr, struct buf **bpp
 			PROC_UNLOCK(curproc);
 		}
 #endif
-		curthread->td_ru.ru_inblock++;
+		RU_ATOMIC_INC(curthread->td_ru.ru_inblock);
 		error = bufwait(bp);
 		if (error != 0) {
 			brelse(bp);

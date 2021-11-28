@@ -2132,7 +2132,7 @@ breada(struct vnode * vp, daddr_t * rablkno, int * rabsize, int cnt,
 			PROC_UNLOCK(curproc);
 		}
 #endif /* RACCT */
-		td->td_ru.ru_inblock++;
+		RU_ATOMIC_INC(td->td_ru.ru_inblock);
 		rabp->b_flags |= B_ASYNC;
 		rabp->b_flags &= ~B_INVAL;
 		if ((flags & GB_CKHASH) != 0) {
@@ -2205,7 +2205,7 @@ breadn_flags(struct vnode *vp, daddr_t blkno, daddr_t dblkno, int size,
 			PROC_UNLOCK(td->td_proc);
 		}
 #endif /* RACCT */
-		td->td_ru.ru_inblock++;
+		RU_ATOMIC_INC(td->td_ru.ru_inblock);
 		bp->b_iocmd = BIO_READ;
 		bp->b_flags &= ~B_INVAL;
 		if ((flags & GB_CKHASH) != 0) {
@@ -2313,7 +2313,7 @@ bufwrite(struct buf *bp)
 		PROC_UNLOCK(curproc);
 	}
 #endif /* RACCT */
-	curthread->td_ru.ru_oublock++;
+	RU_ATOMIC_INC(curthread->td_ru.ru_oublock);
 	if (oldflags & B_ASYNC)
 		BUF_KERNPROC(bp);
 	bp->b_iooffset = dbtob(bp->b_blkno);

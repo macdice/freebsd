@@ -3506,7 +3506,7 @@ ncl_writebp(struct buf *bp, int force __unused, struct thread *td)
 	bp->b_iocmd = BIO_WRITE;
 
 	bufobj_wref(bp->b_bufobj);
-	curthread->td_ru.ru_oublock++;
+	RU_ATOMIC_INC(curthread->td_ru.ru_oublock);
 
 	/*
 	 * Note: to avoid loopback deadlocks, we do not

@@ -1100,7 +1100,7 @@ sdp_sosend(struct socket *so, struct sockaddr *addr, struct uio *uio,
 		goto out;
 	}
 	if (td != NULL)
-		td->td_ru.ru_msgsnd++;
+		RU_ATOMIC_INC(td->td_ru.ru_msgsnd);
 
 	ssk = sdp_sk(so);
 	error = SOCK_IO_SEND_LOCK(so, SBLOCKWAIT(flags));
@@ -1348,7 +1348,7 @@ deliver:
 
 	/* Statistics. */
 	if (uio->uio_td)
-		uio->uio_td->td_ru.ru_msgrcv++;
+		RU_ATOMIC_INC(uio->uio_td->td_ru.ru_msgrcv);
 
 	/* Fill uio until full or current end of socket buffer is reached. */
 	len = min(uio->uio_resid, sbavail(sb));

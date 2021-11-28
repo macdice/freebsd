@@ -63,7 +63,8 @@ typedef	__rlim_t	rlim_t;
  * Resource utilization information.
  *
  * All fields are only modified by curthread and
- * no locks are required to read.
+ * no locks are required to read, except those marked
+ * (a), which are accessed with atomics.
  */
 
 #define	RUSAGE_SELF	0
@@ -81,10 +82,10 @@ struct rusage {
 	long	ru_minflt;		/* page reclaims */
 	long	ru_majflt;		/* page faults */
 	long	ru_nswap;		/* swaps */
-	long	ru_inblock;		/* block input operations */
-	long	ru_oublock;		/* block output operations */
-	long	ru_msgsnd;		/* messages sent */
-	long	ru_msgrcv;		/* messages received */
+	long	ru_inblock;		/* (a) block input operations */
+	long	ru_oublock;		/* (a) block output operations */
+	long	ru_msgsnd;		/* (a) messages sent */
+	long	ru_msgrcv;		/* (a) messages received */
 	long	ru_nsignals;		/* signals received */
 	long	ru_nvcsw;		/* voluntary context switches */
 	long	ru_nivcsw;		/* involuntary " */
@@ -175,6 +176,9 @@ struct loadavg {
 #endif	/* __BSD_VISIBLE */
 
 #ifdef _KERNEL
+
+#define RU_ATOMIC_INC(v) atomic_add_long(&(v), 1)
+#define RU_ATOMIC_ADD(v, d) atomic_add_long(&(v), (d))
 
 extern struct loadavg averunnable;
 void	read_cpu_time(long *cp_time);	/* Writes array of CPUSTATES */

@@ -12900,7 +12900,7 @@ sctp_lower_sosend(struct socket *so,
 	}
 	/* Ok, we will attempt a msgsnd :> */
 	if (p) {
-		p->td_ru.ru_msgsnd++;
+		RU_ATOMIC_INC(p->td_ru.ru_msgsnd);
 	}
 	/* Are we aborting? */
 	if (sinfo_flags & SCTP_ABORT) {

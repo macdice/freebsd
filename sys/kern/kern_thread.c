@@ -64,6 +64,7 @@ __FBSDID("$FreeBSD$");
 #include <sys/pmckern.h>
 #endif
 #include <sys/priv.h>
+#include <sys/aio.h>
 
 #include <security/audit/audit.h>
 
@@ -365,6 +366,9 @@ thread_ctor(void *mem, int size, void *arg, int flags)
 #endif
 	umtx_thread_alloc(td);
 	MPASS(td->td_sel == NULL);
+
+	atomic_store_int(&td->td_aio_count, 0);
+
 	return (0);
 }
 
@@ -406,6 +410,7 @@ thread_dtor(void *mem, int size, void *arg)
 #endif
 	/* Free all OSD associated to this thread. */
 	osd_thread_exit(td);
+	aio_thread_exit(td);
 	td_softdep_cleanup(td);
 	MPASS(td->td_su == NULL);
 	seltdfini(td);

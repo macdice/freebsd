@@ -568,6 +568,37 @@ aio_free_entry(struct kaiocb *job)
 	return (0);
 }
 
+void
+aio_thread_exit(struct thread *td)
+{
+	struct kaioinfo *ki;
+	struct proc *p;
+
+	/*
+	 * Common case.  It's OK if we see a slightly out of date version as
+	 * we'll recheck under lock if it's non-zero.
+	 */
+	if (atomic_load_int(&td->td_aio_count) == 0)
+		return;
+
+	p = td->td_proc;
+	ki = p->p_aioinfo;
+
+	/* If we've ever submitted an IO, p_aioinfo must be set. */
+	MPASS(ki != NULL);
+
+	/*
+	 * Wait until there are no unfinished jobs that were submitted by this
+	 * thread.
+	 */
+	AIO_LOCK(ki);
+	while (atomic_load_int(&td->td_aio_count) > 0) {
+		ki->kaio_flags |= KAIO_WAKEUP;
+		msleep(&p->p_aioinfo, AIO_MTX(ki), PRIBIO, "aiotde", hz);
+	}
+	AIO_UNLOCK(ki);
+}
+
 static void
 aio_proc_rundown_exec(void *arg, struct proc *p,
     struct image_params *imgp __unused)
@@ -938,6 +969,14 @@ notification_done:
 			taskqueue_enqueue(taskqueue_aiod_kick,
 			    &ki->kaio_sync_task);
 	}
+
+	/*
+	 * Drop our reference to the submitting thread.  This allows it to
+	 * exit.
+	 */
+	atomic_subtract_int(&job->td->td_aio_count, 1);
+	job->td = NULL;
+
 	if (ki->kaio_flags & KAIO_WAKEUP) {
 		ki->kaio_flags &= ~KAIO_WAKEUP;
 		wakeup(&userp->p_aioinfo);
@@ -1034,6 +1073,19 @@ aio_complete(struct kaiocb *job, long status, int error)
 
 	job->uaiocb._aiocb_private.error = error;
 	job->uaiocb._aiocb_private.status = status;
+
+	/*
+	 * Transfer the resource usage delta to the submitting thread's
+	 * counters.
+	 */
+	if (job->outblock)
+		RU_ATOMIC_ADD(job->td->td_ru.ru_oublock, job->outblock);
+	if (job->inblock)
+		RU_ATOMIC_ADD(job->td->td_ru.ru_inblock, job->inblock);
+	if (job->msgsnd)
+		RU_ATOMIC_ADD(job->td->td_ru.ru_msgsnd, job->msgsnd);
+	if (job->msgrcv)
+		RU_ATOMIC_ADD(job->td->td_ru.ru_msgrcv, job->msgrcv);
 
 	userp = job->userproc;
 	ki = userp->p_aioinfo;
@@ -1703,6 +1755,13 @@ no_kqueue:
 	job->uiop->uio_offset = job->uaiocb.aio_offset;
 	job->uiop->uio_td = td;
 
+	/*
+	 * Take a reference to the submitting thread, so that worker daemons
+	 * can update this thread's resource usage counters.
+	 */
+	job->td = td;
+	atomic_add_int(&td->td_aio_count, 1);
+
 	if (opcode == LIO_MLOCK) {
 		aio_schedule(job, aio_process_mlock);
 		error = 0;
@@ -1933,10 +1992,6 @@ kern_aio_return(struct thread *td, struct aiocb *ujob, struct aiocb_ops *ops)
 		status = job->uaiocb._aiocb_private.status;
 		error = job->uaiocb._aiocb_private.error;
 		td->td_retval[0] = status;
-		td->td_ru.ru_oublock += job->outblock;
-		td->td_ru.ru_inblock += job->inblock;
-		td->td_ru.ru_msgsnd += job->msgsnd;
-		td->td_ru.ru_msgrcv += job->msgrcv;
 		aio_free_entry(job);
 		AIO_UNLOCK(ki);
 		ops->store_error(ujob, error);
@@ -2564,10 +2619,6 @@ kern_aio_waitcomplete(struct thread *td, struct aiocb **ujobp,
 		status = job->uaiocb._aiocb_private.status;
 		error = job->uaiocb._aiocb_private.error;
 		td->td_retval[0] = status;
-		td->td_ru.ru_oublock += job->outblock;
-		td->td_ru.ru_inblock += job->inblock;
-		td->td_ru.ru_msgsnd += job->msgsnd;
-		td->td_ru.ru_msgrcv += job->msgrcv;
 		aio_free_entry(job);
 		AIO_UNLOCK(ki);
 		ops->store_aiocb(ujobp, ujob);

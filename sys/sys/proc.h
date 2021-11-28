@@ -170,6 +170,7 @@ struct pargs {
  *      y - created at first aio, doesn't change until exit or exec at which
  *          point we are single-threaded and only curthread changes it
  *      z - zombie threads lock
+ *	A - atomic ops
  *
  * If the locking key specifies two identifiers (for example, p_pptr) then
  * either lock is sufficient for read access, but both locks must be held
@@ -383,6 +384,7 @@ struct thread {
 #ifdef EPOCH_TRACE
 	SLIST_HEAD(, epoch_tracker) td_epochs;
 #endif
+	int		td_aio_count;	/* (A) number of AIOs in flight */
 };
 
 struct thread0_storage {

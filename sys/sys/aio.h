@@ -136,6 +136,7 @@ struct kaiocb {
 	int	msgsnd;			/* (*) messages sent */
 	int	msgrcv;			/* (*) messages received */
 	struct	proc *userproc;		/* (*) user process */
+	struct	thread *td;		/* (a) submitting thread */
 	struct	ucred *cred;		/* (*) active credential when created */
 	struct	file *fd_file;		/* (*) pointer to file structure */
 	struct	aioliojob *lio;		/* (*) optional lio job */
@@ -210,6 +211,7 @@ void	aio_complete(struct kaiocb *job, long status, int error);
 void	aio_schedule(struct kaiocb *job, aio_handle_fn_t *func);
 bool	aio_set_cancel_function(struct kaiocb *job, aio_cancel_fn_t *func);
 void	aio_switch_vmspace(struct kaiocb *job);
+void	aio_thread_exit(struct thread *thread);
 
 #else /* !_KERNEL */
 

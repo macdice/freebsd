@@ -29,7 +29,7 @@
 void
 zfs_racct_read(uint64_t size, uint64_t iops)
 {
-	curthread->td_ru.ru_inblock += iops;
+	RU_ATOMIC_ADD(curthread->td_ru.ru_inblock, iops);
 #ifdef RACCT
 	if (racct_enable) {
 		PROC_LOCK(curproc);
@@ -43,7 +43,7 @@ zfs_racct_read(uint64_t size, uint64_t iops)
 void
 zfs_racct_write(uint64_t size, uint64_t iops)
 {
-	curthread->td_ru.ru_oublock += iops;
+	RU_ATOMIC_ADD(curthread->td_ru.ru_oublock, iops);
 #ifdef RACCT
 	if (racct_enable) {
 		PROC_LOCK(curproc);

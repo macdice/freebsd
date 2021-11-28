@@ -257,7 +257,7 @@ cluster_read(struct vnode *vp, u_quad_t filesize, daddr_t lblkno, long size,
 			PROC_UNLOCK(td->td_proc);
 		}
 #endif /* RACCT */
-		td->td_ru.ru_inblock++;
+		RU_ATOMIC_INC(td->td_ru.ru_inblock);
 	}
 
 	/*
@@ -317,7 +317,7 @@ cluster_read(struct vnode *vp, u_quad_t filesize, daddr_t lblkno, long size,
 			PROC_UNLOCK(td->td_proc);
 		}
 #endif /* RACCT */
-		td->td_ru.ru_inblock++;
+		RU_ATOMIC_INC(td->td_ru.ru_inblock);
 	}
 
 	if (reqbp) {

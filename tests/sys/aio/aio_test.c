@@ -39,6 +39,7 @@
  * types.
  */
 
+#include <sys/event.h>
 #include <sys/param.h>
 #include <sys/mdioctl.h>
 #include <sys/module.h>
@@ -53,6 +54,7 @@
 #include <fcntl.h>
 #include <libutil.h>
 #include <limits.h>
+#include <pthread.h>
 #include <semaphore.h>
 #include <signal.h>
 #include <stdint.h>
@@ -1914,6 +1916,71 @@ ATF_TC_CLEANUP(vectored_zvol_poll, tc)
 	aio_zvol_cleanup();
 }
 
+static void *
+aio_threadexit_run(void *arg)
+{
+	struct aiocb *iocb;
+	intptr_t rc;
+
+	iocb = arg;
+	rc = aio_write(iocb);
+
+	return ((void *)rc);
+}
+
+ATF_TC_WITHOUT_HEAD(aio_threadexit);
+ATF_TC_BODY(aio_threadexit, tc)
+{
+	char buffer[] = "hello";
+	struct timespec zero_timeout = {0, 0};
+	pthread_t threads[sizeof(buffer)];
+	struct aiocb iocbs[sizeof(buffer)];
+	struct aiocb *iocbp;
+	int fd;
+
+	ATF_REQUIRE_KERNEL_MODULE("aio");
+	ATF_REQUIRE_UNSAFE_AIO();
+
+	fd = open(FILE_PATHNAME, O_RDWR | O_CREAT, 0600);
+	ATF_REQUIRE(fd >= 0);
+
+	/* Start all the threads, one per byte in buffer. */
+	for (unsigned i = 0; i < nitems(threads); ++i) {
+		memset(&iocbs[i], 0, sizeof(iocbs[i]));
+		iocbs[i].aio_sigevent.sigev_notify = SIGEV_NONE;
+		iocbs[i].aio_fildes = fd;
+		iocbs[i].aio_buf = &buffer[i];
+		iocbs[i].aio_nbytes = 1;
+		iocbs[i].aio_offset = i;
+		ATF_REQUIRE_EQ(0, pthread_create(&threads[i], NULL,
+			aio_threadexit_run, &iocbs[i]));
+	}
+
+	/* Wait for all the threads to exit. */
+	for (unsigned i = 0; i < nitems(threads); ++i) {
+		void *result;
+
+		ATF_REQUIRE_EQ(0, pthread_join(threads[i], &result));
+		ATF_REQUIRE_EQ(0, result);
+	}
+
+	/* Reap the completed IOs, zero timeout should be sufficent.. */
+	for (unsigned i = 0; i < nitems(threads); ++i) {
+		ATF_REQUIRE_EQ(1, aio_waitcomplete(&iocbp, &zero_timeout));
+	}
+
+	/* Nothing more in the kernel's queue. */
+	ATF_REQUIRE_EQ(-1, aio_waitcomplete(&iocbp, &zero_timeout));
+	ATF_REQUIRE_EQ(errno, EAGAIN);
+
+	/* Read the data back to see that our writes all worked. */
+	ATF_REQUIRE_EQ(sizeof(buffer), pread(fd, buffer, sizeof(buffer), 0));
+	ATF_REQUIRE_EQ(0, strcmp("hello", buffer));
+
+	close(fd);
+}
+
+
 ATF_TP_ADD_TCS(tp)
 {
 
@@ -1970,6 +2037,7 @@ ATF_TP_ADD_TCS(tp)
 	ATF_TP_ADD_TC(tp, vectored_unaligned);
 	ATF_TP_ADD_TC(tp, vectored_socket_poll);
 	ATF_TP_ADD_TC(tp, vectored_thread);
+	ATF_TP_ADD_TC(tp, aio_threadexit);
 
 	return (atf_no_error());
 }

@@ -138,10 +138,10 @@ physio(struct cdev *dev, struct uio *uio, int ioflag)
 			g_reset_bio(bp);
 			if (uio->uio_rw == UIO_READ) {
 				bp->bio_cmd = BIO_READ;
-				curthread->td_ru.ru_inblock++;
+				RU_ATOMIC_INC(curthread->td_ru.ru_inblock);
 			} else {
 				bp->bio_cmd = BIO_WRITE;
-				curthread->td_ru.ru_oublock++;
+				RU_ATOMIC_INC(curthread->td_ru.ru_oublock);
 			}
 			bp->bio_offset = uio->uio_offset;
 			base = uio->uio_iov[i].iov_base;
