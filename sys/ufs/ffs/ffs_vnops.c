@@ -87,6 +87,8 @@ __FBSDID("$FreeBSD$");
 #include <sys/vmmeter.h>
 #include <sys/vnode.h>
 
+#include <geom/geom.h>
+
 #include <vm/vm.h>
 #include <vm/vm_param.h>
 #include <vm/vm_extern.h>
@@ -252,6 +254,46 @@ retry:
 		return (ENXIO);
 	return (0);
 }
+
+static int
+ffs_flushwritecache(struct vnode *vp)
+{
+	struct ufsmount *ump;
+	struct bio *bp;
+	int error;
+
+	ump = VFSTOUFS(vp->v_mount);
+
+	/*
+	 * XXX How can we find out if ump has write caching enabled, especially
+	 * volatile write caching, and has DISKFLAG_CANFLUSHCACHE, and skip all
+	 * this if not?
+	 */
+
+	bp = g_alloc_bio();
+
+	bp->bio_cmd = BIO_FLUSH;
+	bp->bio_flags = 0;	/* don't need BIO_ORDERED, caller waited */
+	bp->bio_data = NULL;
+	bp->bio_offset = 0;
+	bp->bio_length = ump->um_cp->provider->mediasize;
+	bp->bio_done = NULL;
+	g_io_request(bp, ump->um_cp);
+	error = biowait(bp, "ffs_fc");
+
+	/* silently ignore errors due to lack of DISKFLAG_CANFLUSHCACHE */
+	if (error != 0 && bp->bio_error == EOPNOTSUPP)
+		error = 0;
+
+	g_destroy_bio(bp);
+
+	return (error);
+}
+
+SYSCTL_DECL(_vfs_ffs);
+static int nocacheflush = 1;
+SYSCTL_INT(_vfs_ffs, OID_AUTO, nocacheflush, CTLFLAG_RWTUN, &nocacheflush, 0,
+    "Disable write cache flushes");
 
 int
 ffs_syncvnode(struct vnode *vp, int waitfor, int flags)
@@ -460,6 +502,9 @@ next_locked:
 		error = ERELOOKUP;
 	if (error == 0)
 		ip->i_flag &= ~IN_NEEDSYNC;
+	if (error == 0 && waitfor == MNT_WAIT && nocacheflush == 0)
+		error = ffs_flushwritecache(vp);
+
 	return (error);
 }
 
@@ -1036,6 +1081,12 @@ ffs_write(
 		if (ffs_fsfail_cleanup(VFSTOUFS(vp->v_mount), error))
 			error = ENXIO;
 	}
+	/*
+	 * For O_SYNC and O_DSYNC writes, we could potentially use FUA, but for
+	 * now just flush like fsync/fdatasync.
+	 */
+	if (error == 0 && (ioflag & IO_SYNC) && nocacheflush == 0)
+		error = ffs_flushwritecache(vp);
 	return (error);
 }
 

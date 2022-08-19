@@ -287,6 +287,14 @@ upon reallocating file system blocks to be contiguous.
 Enable support for the rearrangement of blocks
 to be contiguous.
 .Pq Default: 1 .
+.It Va vfs.ffs.nocacheflush
+Disables device write cache flushes.
+Without cache flushes, data may be lost on power loss even after
+.Xr fsync 2
+or
+.Xr fdatasync 2
+completes, on storage with a volatile write cache.
+.Pq Default: 1 .
 .El
 .Sh HISTORY
 The
