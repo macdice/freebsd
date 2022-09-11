@@ -155,6 +155,17 @@
 # include <sys/socket.h>
 #endif
 
+/*
+ * XXX Define this to test shmem-based job tokens.
+ * XXX Probably only works if using kqueue
+ */
+#define USE_JOB_TOKEN_SHMEM
+
+#ifdef USE_JOB_TOKEN_SHMEM
+#include <stdatomic.h>
+#include <sys/mman.h>
+#endif
+
 #include "make.h"
 #include "dir.h"
 #include "job.h"
@@ -264,6 +275,64 @@ typedef struct ShellWriter {
 	bool xtraced;
 
 } ShellWriter;
+
+
+#ifdef USE_JOB_TOKEN_SHMEM
+
+/*
+ * Maximum length of the job token wait queue before we fall back to a less
+ * efficient polling/sleep.
+ *
+ * XXX Could be expandable...
+ */
+#define JOB_TOKEN_SHMEM_DEFAULT_CAPACITY 4096
+
+/*
+ * Shared memory object for allocating tokens.
+ *
+ * Conceptually this is a semaphore.  We don't want to block on a normal
+ * semaphore while waiting for a token, because we also need to read input from
+ * child processes and we don't want to create another thread just to do that.
+ * So we have our own counter ('tokens').  The pipe approach with '+'
+ * characters is also basically a sort of semaphore that you can multiplex with
+ * other readiness-based I/O, but it suffers from thundering herd wakeups when
+ * a new token is available.  So here we arrange to signal just one waiter at a
+ * time.
+ */
+typedef struct JobTokenShmem {
+	volatile atomic_int lock;
+	int tokens;
+	int wait_size;
+	int wait_capacity;
+	pid_t wait_list[];
+} JobTokenShmem;
+
+static int job_token_fd;
+static JobTokenShmem *job_token_shmem;
+static int wait_index = -1;
+static pid_t my_pid;
+
+static void
+job_token_shmem_lock(JobTokenShmem *shmem)
+{
+	int expected = 0;
+
+	/*
+	 * XXX Using a spinlock on the assumption that it's not OK to add -lpthread
+	 * to bmake.  It would be better to use pthread shared robust mutexes,
+	 * since they would be automatically released on exit via signal.
+	 */
+	while (!atomic_compare_exchange_weak(&shmem->lock, &expected, 1))
+		;
+}
+
+static void
+job_token_shmem_unlock(JobTokenShmem *shmem)
+{
+	shmem->lock = 0;
+}
+
+#endif
 
 /*
  * FreeBSD: traditionally .MAKE is not required to
@@ -473,7 +542,9 @@ static void clearfd(Job *);
 static bool readyfd(Job *);
 
 static char *targPrefix = NULL;	/* To identify a job change in the output. */
+#ifndef USE_JOB_TOKEN_SHMEM
 static Job tokenWaitJob;	/* token wait pseudo-job */
+#endif
 
 static Job childExitJob;	/* child exit pseudo-job */
 #define CHILD_EXIT "."
@@ -1514,6 +1585,7 @@ JobExec(Job *job, char **argv)
 		if (lseek(0, 0, SEEK_SET) == -1)
 			execDie("lseek to 0", "stdin");
 
+#ifndef USE_JOB_TOKEN_SHMEM
 		if (Always_pass_job_queue ||
 		    (job->node->type & (OP_MAKE | OP_SUBMAKE))) {
 			/*
@@ -1526,6 +1598,7 @@ JobExec(Job *job, char **argv)
 				execDie("clear close-on-exec",
 				    "tokenWaitJob.outPipe");
 		}
+#endif
 
 		/*
 		 * Set up the child's output to be routed through the pipe
@@ -2175,7 +2248,7 @@ Job_CatchOutput(void)
 				Punt("unexpected eof on token pipe");
 			else
 				Punt("token pipe read: %s", strerror(errno));
-		} else {
+		} else if (job) {
 			if (job->status == JOB_ST_RUNNING)
 				CollectOutput(job, false);
 #if defined(USE_FILEMON) && !defined(USE_FILEMON_DEV)
@@ -2328,6 +2401,7 @@ AddSig(int sig, SignalProc handler)
 	}
 }
 
+#ifndef USE_JOB_TOKEN_SHMEM
 static void
 setWantToken(int x)
 {
@@ -2341,6 +2415,7 @@ setWantToken(int x)
 	wantToken = x;
 #endif
 }
+#endif
 
 /* Initialize the process module. */
 void
@@ -2389,6 +2464,17 @@ Job_Init(void)
 	kq = kqueue();
 	if (kq < 0)
 		Punt("could not create kqueue");
+#ifdef USE_JOB_TOKEN_SHMEM
+	{
+		struct kevent kev;
+
+		/* We want to receive SIGUSR1 via our kqueue. */
+		signal(SIGUSR1, SIG_IGN);
+		EV_SET(&kev, SIGUSR1, EVFILT_SIGNAL, EV_ADD, 0, 0, NULL);
+		if (kevent(kq, &kev, 1, NULL, 0, NULL) < 0)
+			Punt("kevent change failed");
+	}
+#endif
 #else
 	{
 		/* Preallocate enough for the maximum number of jobs. */
@@ -2400,10 +2486,14 @@ Job_Init(void)
 #endif
 
 	/* These are permanent entries and take slots 0 and 1 */
+#ifndef USE_JOB_TOKEN_SHMEM
 	watchfd(&tokenWaitJob);
+#endif
 	watchfd(&childExitJob);
 
+#ifndef USE_JOB_TOKEN_SHMEM
 	setWantToken(0);
+#endif
 
 	sigemptyset(&caught_signals);
 	/*
@@ -2959,6 +3049,20 @@ readyfd(Job *job)
 static void
 JobTokenAdd(void)
 {
+#ifdef USE_JOB_TOKEN_SHMEM
+	pid_t wake = -1;
+
+	job_token_shmem_lock(job_token_shmem);
+	job_token_shmem->tokens++;
+	if (job_token_shmem->wait_size > 0) {
+		wake = job_token_shmem->wait_list[job_token_shmem->wait_size - 1];
+		job_token_shmem->wait_size--;
+	}
+	job_token_shmem_unlock(job_token_shmem);
+
+	if (wake > 0 && wake != my_pid)
+		kill(wake, SIGUSR1);
+#else
 	char tok = JOB_TOKENS[aborting], tok1;
 
 	if (!Job_error_token && aborting == ABORT_ERROR) {
@@ -2975,6 +3079,7 @@ JobTokenAdd(void)
 	    getpid(), aborting, tok);
 	while (write(tokenWaitJob.outPipe, &tok, 1) == -1 && errno == EAGAIN)
 		continue;
+#endif
 }
 
 /* Get a temp file */
@@ -3000,6 +3105,47 @@ Job_ServerStart(int max_tokens, int jp_0, int jp_1)
 	int i;
 	char jobarg[64];
 
+#ifdef USE_JOB_TOKEN_SHMEM
+
+	my_pid = getpid();
+	if (jp_0 >= 0) {
+		/* Non-root process receives shmem descriptor from parent. */
+		job_token_fd = jp_0;
+	} else {
+		/* Root process must create the shmem. */
+		int capacity;
+		size_t size;
+
+		capacity = JOB_TOKEN_SHMEM_DEFAULT_CAPACITY;
+		size = sizeof(JobTokenShmem) + sizeof(pid_t) * capacity;
+		job_token_fd = shm_open(SHM_ANON, O_CREAT | O_RDWR, 0400);
+		if (job_token_fd < 0)
+			Punt("shm_open");
+		if (ftruncate(job_token_fd, size) < 0)
+			Punt("ftruncate");
+		if (fcntl(job_token_fd, F_SETFD, 0) < 0)
+			Punt("fcntl");
+	}
+
+	/* Map the shmem. */
+	job_token_shmem = mmap(NULL, sizeof(JobTokenShmem), PROT_READ | PROT_WRITE,
+		MAP_SHARED, job_token_fd, 0);
+	if (job_token_shmem == MAP_FAILED)
+		Punt("mmap failed for %d", job_token_fd);
+
+	/* Non-root process finishes initialization here. */
+	if (jp_0 >= 0) {
+		return;
+	}
+
+	/* In root process, initialize the shmem object. */
+	job_token_shmem->wait_capacity = JOB_TOKEN_SHMEM_DEFAULT_CAPACITY;
+
+	/* Make shmem fd available to all child processes. */
+	snprintf(jobarg, sizeof jobarg, "%d,-1", job_token_fd);
+
+#else
+
 	if (jp_0 >= 0 && jp_1 >= 0) {
 		/* Pipe passed in from parent */
 		tokenWaitJob.inPipe = jp_0;
@@ -3013,6 +3159,7 @@ Job_ServerStart(int max_tokens, int jp_0, int jp_1)
 
 	snprintf(jobarg, sizeof jobarg, "%d,%d",
 	    tokenWaitJob.inPipe, tokenWaitJob.outPipe);
+#endif
 
 	Global_Append(MAKEFLAGS, "-J");
 	Global_Append(MAKEFLAGS, jobarg);
@@ -3036,8 +3183,13 @@ Job_TokenReturn(void)
 	jobTokensRunning--;
 	if (jobTokensRunning < 0)
 		Punt("token botch");
+#ifdef USE_JOB_TOKEN_SHMEM
+	if (jobTokensRunning != 0)
+		JobTokenAdd();
+#else
 	if (jobTokensRunning != 0 || JOB_TOKENS[aborting] != '+')
 		JobTokenAdd();
+#endif
 }
 
 /*
@@ -3052,6 +3204,46 @@ Job_TokenReturn(void)
 bool
 Job_TokenWithdraw(void)
 {
+#ifdef USE_JOB_TOKEN_SHMEM
+	bool result = false;
+
+	/*
+	 * XXX This doesn't do efficient abort yet ("failure detected in another branch
+	 * of parallel make"), but that's probably just a flag and a wake-all loop?
+	 */
+
+	/* We're always allowed one free token per (sub)make. */
+	if (jobTokensRunning == 0) {
+		jobTokensRunning++;
+		return true;
+	}
+
+	if (aborting != ABORT_NONE || (jobTokensRunning >= opts.maxJobs))
+		return false;
+
+	job_token_shmem_lock(job_token_shmem);
+	if (job_token_shmem->tokens > 0) {
+		/* Token granted. */
+		job_token_shmem->tokens--;
+		result = true;
+	} else if (wait_index >= 0 &&
+		wait_index < job_token_shmem->wait_size &&
+		job_token_shmem->wait_list[wait_index] == my_pid) {
+		/* We already seem to be in the wait list, nothing to do. */
+	} else if (job_token_shmem->wait_size == job_token_shmem->wait_capacity) {
+		/* No more space.  Oh well, we'll just have to sleep and retry. */
+	} else {
+		/* Add self to wait list. */
+		wait_index = job_token_shmem->wait_size++;
+		job_token_shmem->wait_list[wait_index] = my_pid;
+	}
+	job_token_shmem_unlock(job_token_shmem);
+
+	if (result)
+		jobTokensRunning++;
+
+	return result;
+#else
 	char tok, tok1;
 	ssize_t count;
 
@@ -3098,6 +3290,7 @@ Job_TokenWithdraw(void)
 	jobTokensRunning++;
 	DEBUG1(JOB, "(%d) withdrew token\n", getpid());
 	return true;
+#endif
 }
 
 /*
