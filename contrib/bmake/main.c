@@ -388,7 +388,7 @@ MainParseArgJobsInternal(const char *argvalue)
 		usage();
 	}
 	if ((fcntl(jp_0, F_GETFD, 0) < 0) ||
-	    (fcntl(jp_1, F_GETFD, 0) < 0)) {
+	    (jp_1 != -1 && fcntl(jp_1, F_GETFD, 0) < 0)) {
 		jp_0 = -1;
 		jp_1 = -1;
 		opts.compatMake = true;
