@@ -129,6 +129,9 @@ static const struct syscall_decode decoded_syscalls[] = {
 		    { Ptr, 4 } } },
 	{ .name = "accept", .ret_type = 1, .nargs = 3,
 	  .args = { { Int, 0 }, { Sockaddr | OUT, 1 }, { Ptr | OUT, 2 } } },
+	{ .name = "accept4", .ret_type = 1, .nargs = 4,
+	  .args = { { Int, 0 }, { Sockaddr | OUT, 1 }, { Ptr | OUT, 2 },
+		    { Accept4Flags, 3 } } },
 	{ .name = "access", .ret_type = 1, .nargs = 2,
 	  .args = { { Name | IN, 0 }, { Accessmode, 1 } } },
 	{ .name = "aio_cancel", .ret_type = 1, .nargs = 2,
@@ -2303,6 +2306,9 @@ print_arg(struct syscall_arg *sc, syscallarg_t *args, syscallarg_t *retval,
 		break;
 	case Atflags:
 		print_mask_arg(sysdecode_atflags, fp, args[sc->offset]);
+		break;
+	case Accept4Flags:
+		print_mask_arg(sysdecode_accept4_flags, fp, args[sc->offset]);
 		break;
 	case Accessmode:
 		print_mask_arg(sysdecode_access_mode, fp, args[sc->offset]);

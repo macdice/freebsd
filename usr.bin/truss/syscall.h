@@ -85,6 +85,7 @@ enum Argtype {
 	QuadHex,
 
 	/* Encoded scalar values. */
+	Accept4Flags,
 	Accessmode,
 	Acltype,
 	AiofsyncOp,
