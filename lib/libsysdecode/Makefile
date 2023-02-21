@@ -79,7 +79,8 @@ MLINKS+=sysdecode_fcntl_arg.3 sysdecode_fcntl_arg_p.3
 MLINKS+=sysdecode_kevent.3 sysdecode_kevent_fflags.3 \
 	sysdecode_kevent.3 sysdecode_kevent_filter.3 \
 	sysdecode_kevent.3 sysdecode_kevent_flags.3
-MLINKS+=sysdecode_mask.3 sysdecode_accessmode.3 \
+MLINKS+=sysdecode_mask.3 sysdecode_accept4_flags.3 \
+	sysdecode_mask.3 sysdecode_accessmode.3 \
 	sysdecode_mask.3 sysdecode_atflags.3 \
 	sysdecode_mask.3 sysdecode_capfcntlrights.3 \
 	sysdecode_mask.3 sysdecode_fcntl_fileflags.3 \

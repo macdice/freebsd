@@ -41,6 +41,7 @@ enum sysdecode_abi {
 };
 
 int	sysdecode_abi_to_freebsd_errno(enum sysdecode_abi _abi, int _error);
+bool	sysdecode_accept4_flags(FILE *_fp, int _flags, int *_rem);
 bool	sysdecode_access_mode(FILE *_fp, int _mode, int *_rem);
 const char *sysdecode_acltype(int _type);
 const char *sysdecode_atfd(int _fd);

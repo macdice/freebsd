@@ -567,6 +567,17 @@ sysdecode_pipe2_flags(FILE *fp, int flags, int *rem)
 	return (print_mask_0(fp, pipe2flags, flags, rem));
 }
 
+static struct name_table accept4flags[] = {
+	X(SOCK_CLOEXEC) X(SOCK_NONBLOCK) XEND
+};
+
+bool
+sysdecode_accept4_flags(FILE *fp, int flags, int *rem)
+{
+
+	return (print_mask_0(fp, accept4flags, flags, rem));
+}
+
 const char *
 sysdecode_prio_which(int which)
 {
