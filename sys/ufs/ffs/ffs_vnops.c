@@ -634,6 +634,217 @@ ffs_read_hole(struct uio *uio, long xfersize, long *size)
 	return (0);
 }
 
+static bool
+ffs_iov_aligned(struct iovec *iov, size_t sector_size)
+{
+	/* Every iovec must begin on a memory page boundary. */
+	if ((((uintptr_t) iov->iov_base) & (PAGE_SIZE - 1)) != 0)
+                return (false);
+
+        /* Every iovec must cover whole memory pages and sectors. */
+        if ((iov->iov_len & (MAX(PAGE_SIZE, sector_size) - 1)) != 0)
+                return (false);
+
+        return (true);
+}
+
+static int
+ffs_log_to_phys_blkno(struct vnode *vp,
+    ufs2_daddr_t log_blkno, 
+    ufs2_daddr_t *phys_blkno)
+{
+	return (ufs_bmaparray(vp, log_blkno, phys_blkno, NULL, NULL, NULL));
+}
+
+static int
+ffs_find_phys_io(struct vnode *vp,
+    struct uio *uio,
+    off_t *phys_offset,
+    size_t *phys_length,
+    bool *short_xfer)
+{
+        struct inode *ip;
+        struct fs *fs;
+        struct vnode *devvp;
+        size_t sector_size;
+        off_t offset;
+        off_t offset_in_block;
+        daddr_t phys_blkno;
+	size_t length;
+	size_t rest_of_block;
+	size_t rest_of_iov;
+	size_t rest_of_maxphys;
+        int iovcnt;
+	int iov_index;
+        int error;
+	
+        ip = VTOI(vp);
+        fs = ITOFS(ip);
+        devvp = ITODEVVP(ip);
+        sector_size = devvp->v_bufobj.bo_bsize;
+        offset = uio->uio_offset;
+	iovcnt = uio->uio_iovcnt;
+
+        /* Offset must be aligned on a physical sector. */
+        if (offset & (sector_size - 1))
+                return (EINVAL);
+
+        /* First iovec must cover whole memory pages and sectors. */
+        if (iovcnt == 0 ||
+	    !ffs_iov_aligned(&uio->uio_iov[0], sector_size))
+                return (EINVAL);
+
+	/* Find first physical block. */
+        error = ffs_log_to_phys_blkno(vp, lblkno(fs, offset), &phys_blkno);
+        if (error)
+                return(error);
+	printf("xxx log blockno = %zu, phys blockno = %zu\n", (size_t) lblkno(fs, offset), (size_t) phys_blkno);
+
+	/*
+	 * Find the offset of the first sector, which may be somewhere
+	 * inside the first physical block.
+	 */
+        offset_in_block = blkoff(fs, offset);
+        *phys_offset = lblktosize(fs, phys_blkno) + offset_in_block;
+
+	/*
+	 * Map to contiguous physical sectors while also validating
+	 * the rest of the iovecs, in one pass.
+	 */
+	iov_index = 0;
+	rest_of_block = fs->fs_bsize - offset_in_block;
+	rest_of_iov = uio->uio_iov[iov_index].iov_len;
+	rest_of_maxphys = maxphys;
+	length = 0;
+	for (;;) {
+		size_t step;
+
+		step = MIN(rest_of_iov, rest_of_block);
+		step = MIN(step, rest_of_maxphys);
+		rest_of_iov -= step;
+		rest_of_block -= step;
+		rest_of_maxphys -= step;
+		length += step;
+
+		/* Is this iovec now fully processed? */
+		if (rest_of_iov == 0) {
+			/* Have we cover all iovecs? */
+			if (++iov_index == iovcnt) {
+				*short_xfer = false;
+				break;
+			}
+			/* Prepare to process next iovec. */
+	    		if (!ffs_iov_aligned(&uio->uio_iov[iov_index], sector_size))
+				return (EINVAL);
+			rest_of_iov = uio->uio_iov[iov_index].iov_len;
+		}
+
+		/* Maximum transfer size reached?  If so, I/O must be split. */
+		if (rest_of_maxphys == 0) {
+			*short_xfer = true;
+			break;
+		}
+
+		/* Is this block entirely processed? */
+		if (rest_of_block == 0) {
+        		daddr_t next_phys_blkno;
+
+		        error = ffs_log_to_phys_blkno(vp,
+			    lblkno(fs, offset + length),
+			    &next_phys_blkno);
+		        if (error)
+		                return(error);
+
+			/* Is the next one physically discontiguous? */
+			if (next_phys_blkno != phys_blkno + 1) {
+				*short_xfer = true;
+				break;
+			}
+			phys_blkno = next_phys_blkno;
+			rest_of_block = fs->fs_bsize;
+		}
+	}
+	*phys_length = length;
+
+	return (0);
+}
+
+static void
+ffs_adjust_partially_xferred_uio(struct uio *uio, size_t xferred)
+{
+	struct iovec *iov = uio->uio_iov;
+
+	uio->uio_offset += xferred;
+	while (iov->iov_len <= xferred)
+	{
+		xferred -= iov->iov_len;
+		iov++;
+		uio->uio_iovcnt--;
+	}
+	KASSERT(uio->uio_iovcnt > 0, ("uio not partially xferred"));
+	iov->iov_base = (uint8_t *) iov->iov_base + xferred;
+	iov->iov_len -= xferred;
+	if (iov != uio->uio_iov)
+		memmove(uio->uio_iov, iov, sizeof(*iov) * uio->uio_iovcnt);
+}
+
+static struct uio *
+ffs_dup_uio(struct uio *uio)
+{
+	struct iovec *new_iov;
+	struct uio *new_uio;
+
+	new_uio = malloc(sizeof(struct uio) + sizeof(struct iovec) * uio->uio_iovcnt,
+	    M_TEMP, M_WAITOK);
+	*new_uio = *uio;
+	new_iov = (struct iovec *)(((uint8_t *)new_uio) + sizeof(struct uio));
+	memcpy(new_iov, uio->uio_iov, sizeof(*new_iov) * uio->uio_iovcnt);
+	new_uio->uio_iov = new_iov;
+
+	return (new_uio);
+}
+
+static int
+ffs_direct_io(struct vnode *vp, struct uio *uio)
+{
+	struct uio *resid_uio;
+	off_t phys_offset;
+	off_t phys_length;
+	bool short_xfer;
+	int error;
+
+	resid_uio = uio;
+
+	printf("xxx ffs_direct_io\n");
+	do {
+		error = ffs_find_phys_io(vp, resid_uio,
+		    &phys_offset, &phys_length, &short_xfer);
+		if (error != 0)
+		{
+			printf("xxx ffs_find_phys_io said %d\n", error);
+			break;
+		}
+
+		printf("xxx would do IO: phys_begin = %zu, phys_length= %zu\n", phys_offset, phys_length);
+
+		if (short_xfer) {
+			/*
+			 * Make a copy we can modify, if we haven't
+			 * already.  Then adjust it to remove the part
+			 * we have already transferred.
+			 */
+			if (resid_uio == uio)
+				resid_uio = ffs_dup_uio(uio);
+			ffs_adjust_partially_xferred_uio(resid_uio, phys_length);
+		}
+	} while (short_xfer);
+
+	if (resid_uio != uio)
+		free(resid_uio, M_TEMP);
+
+	return (error);
+}
+
 /*
  * Vnode op for reading.
  */
@@ -666,6 +877,11 @@ ffs_read(
 #else
 		panic("ffs_read+IO_EXT");
 #endif
+	if ((ioflag & IO_DIRECT) != 0) {
+		error = ffs_direct_io(vp, uio);
+		if (error == 0 || error != EINVAL)
+			return error;
+	}
 #ifdef DIRECTIO
 	if ((ioflag & IO_DIRECT) != 0) {
 		int workdone;
