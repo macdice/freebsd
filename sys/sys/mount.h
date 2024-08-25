@@ -493,7 +493,7 @@ struct mntoptnames {
 					      EFAULT. */
 #define	MNTK_RECURSE		0x00000200 /* pending recursive unmount */
 #define	MNTK_UPPER_WAITER	0x00000400 /* waiting to drain MNTK_UPPER_PENDING */
-/* UNUSED 			0x00000800 */
+#define	MNTK_SHARED_DIRECT	0x00000800 /* Allow shared locking for direct I/O */
 #define	MNTK_UNLOCKED_INSMNTQUE	0x00001000 /* fs does not lock the vnode for
 					      insmntque */
 #define	MNTK_UNMAPPED_BUFS	0x00002000
@@ -523,6 +523,13 @@ MNT_SHARED_WRITES(struct mount *mp)
 {
 
 	return (mp != NULL && (mp->mnt_kern_flag & MNTK_SHARED_WRITES) != 0);
+}
+
+static inline int
+MNT_SHARED_DIRECT(struct mount *mp)
+{
+
+	return (mp != NULL && (mp->mnt_kern_flag & MNTK_SHARED_DIRECT) != 0);
 }
 
 static inline int

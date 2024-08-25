@@ -1192,7 +1192,8 @@ ffs_mountfs(struct vnode *odevvp, struct mount *mp, struct thread *td)
 	 */
 	MNT_ILOCK(mp);
 	mp->mnt_kern_flag |= MNTK_LOOKUP_SHARED | MNTK_EXTENDED_SHARED |
-	    MNTK_NO_IOPF | MNTK_UNMAPPED_BUFS | MNTK_USES_BCACHE;
+	    MNTK_NO_IOPF | MNTK_UNMAPPED_BUFS | MNTK_USES_BCACHE |
+	    MNTK_SHARED_DIRECT;
 	MNT_IUNLOCK(mp);
 #ifdef UFS_EXTATTR
 #ifdef UFS_EXTATTR_AUTOSTART

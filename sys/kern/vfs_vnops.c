@@ -1090,7 +1090,8 @@ vn_read(struct file *fp, struct uio *uio, struct ucred *active_cred, int flags,
 	 * Try to read from page cache.  VIRF_DOOMED check is racy but
 	 * allows us to avoid unneeded work outright.
 	 */
-	if (vn_io_pgcache_read_enable && !mac_vnode_check_read_enabled() &&
+	if ((ioflag & IO_DIRECT) == 0 &&
+	    vn_io_pgcache_read_enable && !mac_vnode_check_read_enabled() &&
 	    (vn_irflag_read(vp) & (VIRF_DOOMED | VIRF_PGREAD)) == VIRF_PGREAD) {
 		error = VOP_READ_PGCACHE(vp, uio, ioflag, fp->f_cred);
 		if (error == 0) {
@@ -1101,7 +1102,10 @@ vn_read(struct file *fp, struct uio *uio, struct ucred *active_cred, int flags,
 			return (error);
 	}
 
-	advice = get_advice(fp, uio);
+	if (ioflag & IO_DIRECT)
+		advice = -1;
+	else
+		advice = get_advice(fp, uio);
 	vn_lock(vp, LK_SHARED | LK_RETRY);
 
 	switch (advice) {
@@ -1133,6 +1137,19 @@ vn_read(struct file *fp, struct uio *uio, struct ucred *active_cred, int flags,
 		error = VOP_ADVISE(vp, orig_offset, uio->uio_offset - 1,
 		    POSIX_FADV_DONTNEED);
 	return (error);
+}
+
+static int
+vn_lktype_write_ioflag(struct mount *mp, struct vnode *vp, int ioflag)
+{
+	if (MNT_SHARED_DIRECT(mp) ||
+	    (mp == NULL && MNT_SHARED_DIRECT(vp->v_mount))) {
+		if (ioflag & IO_DIRECT)
+			return (LK_SHARED);
+		else
+			return (LK_EXCLUSIVE);
+	}
+	return vn_lktype_write(mp, vp);
 }
 
 /*
@@ -1171,9 +1188,12 @@ vn_write(struct file *fp, struct uio *uio, struct ucred *active_cred, int flags,
 		need_finished_write = true;
 	}
 
-	advice = get_advice(fp, uio);
+	if (ioflag & IO_DIRECT)
+		advice = -1;
+	else
+		advice = get_advice(fp, uio);
 
-	vn_lock(vp, vn_lktype_write(mp, vp) | LK_RETRY);
+	vn_lock(vp, vn_lktype_write_ioflag(mp, vp, ioflag) | LK_RETRY);
 	switch (advice) {
 	case POSIX_FADV_NORMAL:
 	case POSIX_FADV_SEQUENTIAL:
@@ -1484,17 +1504,34 @@ vn_io_fault(struct file *fp, struct uio *uio, struct ucred *active_cred,
 	do_rangelock = do_io_fault || (vn_irflag_read(vp) & VIRF_PGREAD) != 0;
 	foffset_lock_uio(fp, uio, flags);
 	if (do_rangelock) {
-		if (uio->uio_rw == UIO_READ) {
-			rl_cookie = vn_rangelock_rlock(vp, uio->uio_offset,
-			    uio->uio_offset + uio->uio_resid);
-		} else if ((fp->f_flag & O_APPEND) != 0 ||
+		bool exclusive;
+		vm_offset_t begin;
+		vm_offset_t end;
+
+		begin = uio->uio_offset;
+		end = begin + uio->uio_resid;
+		exclusive = uio->uio_rw == UIO_WRITE;
+
+		if ((fp->f_flag & O_APPEND) != 0 ||
 		    (flags & FOF_OFFSET) == 0) {
 			/* For appenders, punt and lock the whole range. */
-			rl_cookie = vn_rangelock_wlock(vp, 0, OFF_MAX);
-		} else {
-			rl_cookie = vn_rangelock_wlock(vp, uio->uio_offset,
-			    uio->uio_offset + uio->uio_resid);
+			begin = 0;
+			end = OFF_MAX;
+		} else if (MNT_SHARED_DIRECT(vp->v_mount)) {
+			/* MNT_SHARED_DIRECT locking policy. */
+			if (fp->f_flag & O_DIRECT) {
+				exclusive = true;
+			} else {
+				int bsize = vp->v_bufobj.bo_bsize;
+				begin = rounddown(begin, bsize);
+				end = roundup(end, bsize);
+			}
 		}
+
+		if (exclusive)
+			rl_cookie = vn_rangelock_wlock(vp, begin, end);
+		else
+			rl_cookie = vn_rangelock_rlock(vp, begin, end);
 	}
 	if (do_io_fault) {
 		args.kind = VN_IO_FAULT_FOP;

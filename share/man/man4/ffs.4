@@ -276,7 +276,43 @@ The following
 .Xr sysctl 8
 MIBs are defined for use with
 .Nm :
-.Bl -hang -width ".Va vfs.ffs.doreallocblk"
+.Bl -hang -width ".Va vfs.ffs.direct.cache_policy"
+.It Va vfs.ffs.direct.cache_policy
+Controls the caching behavior of files opened with the
+.Dv O_DIRECT
+flag.
+.Bl -hang
+.It Va Level 0
+uses the buffer cache just like regular buffered I/O, but tries to minimize
+long term impact on other users of the cache by recycling buffers.
+.It Va Level 1
+attempts to bypass the buffer cache, transferring data directly between the
+storage device and user space buffers.  If an operation overlaps with already
+cached data, level 1 silently falls back to level 0 behavior to maintain
+cache coherency.  This policy is biased towards buffered performance when there
+is mixed access.
+.It Va Level 2
+attempts to bypass the buffer cache, and evicts any overlapping clean data
+from the page cache to maintain cache coherency.  This policy is biased towards
+direct I/O performance when there is mixed access.  Overlapping dirty cached
+data causes direct I/O operations to fall back to level 0 behavior.
+.El
+.Pq Default: 1 .
+.It Va vfs.ffs.direct.einval
+If set to 1, direct I/O operations that are not aligned to device sectors
+and virtual memory pages fail with error
+.Dv EINVAL ,
+for compatibility with many other operating systems.
+If set to 0, non-aligned operations silently fall back to cache policy 0.
+.Pq Default: 0 .
+.It Va vfs.ffs.direct.ebusy
+When
+.Dv cache_policy
+is set above 0, unresolvable cache conflicts normally fall back to cache level
+0 behavior.  For testing, this option can be set to 1 to fail with error
+.Dv EBUSY
+instead.
+.Pq Default: 0 .
 .It Va vfs.ffs.doasyncfree
 Asynchronously write out modified i-node and indirect blocks
 upon reallocating file system blocks to be contiguous.

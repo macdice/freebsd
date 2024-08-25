@@ -82,12 +82,15 @@
 #include <sys/vmmeter.h>
 #include <sys/vnode.h>
 
+#include <geom/geom.h>
+
 #include <vm/vm.h>
 #include <vm/vm_param.h>
 #include <vm/vm_extern.h>
 #include <vm/vm_object.h>
 #include <vm/vm_page.h>
 #include <vm/vm_pager.h>
+#include <vm/vm_map.h>
 #include <vm/vnode_pager.h>
 
 #include <ufs/ufs/extattr.h>
@@ -217,6 +220,25 @@ struct vop_vector ffs_fifoops2 = {
 	.vop_fplookup_symlink = VOP_EAGAIN,
 };
 VFS_VOP_VECTOR_REGISTER(ffs_fifoops2);
+
+SYSCTL_DECL(_vfs_ffs);
+SYSCTL_NODE(_vfs_ffs, OID_AUTO, direct, CTLFLAG_RD | CTLFLAG_MPSAFE, 0,
+    "Direct I/O");
+
+static int	ffs_direct_cache_policy = 1;
+SYSCTL_INT(_vfs_ffs_direct, OID_AUTO, cache_policy,
+    CTLFLAG_RW, &ffs_direct_cache_policy, 1,
+    "Cache policy");
+
+static int	ffs_direct_einval = 0;
+SYSCTL_INT(_vfs_ffs_direct, OID_AUTO, einval,
+    CTLFLAG_RW, &ffs_direct_einval, 0,
+    "Fail with EINVAL on badly aligned arguments");
+
+static int	ffs_direct_ebusy = 0;
+SYSCTL_INT(_vfs_ffs_direct, OID_AUTO, ebusy,
+    CTLFLAG_RW, &ffs_direct_ebusy, 0,
+    "Fail with EBUSY on cache conflicts");
 
 /*
  * Synch an open file.
@@ -634,6 +656,364 @@ ffs_read_hole(struct uio *uio, long xfersize, long *size)
 	return (0);
 }
 
+static int
+ffs_direct_find_contiguous(struct vnode *vp,
+    off_t logical_offset,
+    size_t logical_length,
+    off_t *phys_offset,
+    size_t *phys_length)
+{
+	struct inode *ip;
+	struct fs *fs;
+	ufs_lbn_t blkno;
+	daddr_t phys_blkno;
+	off_t offset;
+	int phys_run;
+	int error;
+
+	ip = VTOI(vp);
+	fs = ITOFS(ip);
+
+	/* No direct path for small blocks. */
+	blkno = lblkno(fs, logical_offset);
+	if (blksize(fs, ip, blkno) != fs->fs_bsize)
+		return (ENOTSUP);
+
+	/* Find longest physical block range beginning at logical_offset. */
+	error = ufs_bmaparray(vp, blkno, &phys_blkno, NULL, &phys_run, NULL);
+	if (error)
+		return (error);
+
+	/* No direct path for holes. */
+	if (phys_blkno == -1)
+		return (ENOTSUP);
+
+	/* Locate the first sector we want inside this block. */
+	offset = blkoff(fs, logical_offset);
+	*phys_offset = dbtob(phys_blkno) + offset;
+
+	/* Compute the maximum possible physical length. */
+	*phys_length = (fs->fs_bsize - offset) + phys_run * fs->fs_bsize;
+	*phys_length = MIN(*phys_length, logical_length);
+	*phys_length = MIN(*phys_length, maxphys);
+
+	return (0);
+}
+
+static int
+ffs_direct_hold_pages(struct uio *uio, int sector_size,
+    struct vm_page **pages, int npages)
+{
+	struct iovec *iov;
+	int iovcnt;
+	int count;
+	int n;
+	vm_prot_t prot;
+	int error;
+
+	prot = VM_PROT_READ;
+	if (uio->uio_rw == UIO_READ)
+		prot |= VM_PROT_WRITE;
+	iovcnt = uio->uio_iovcnt;
+
+	count = 0;
+	error = 0;
+
+	for (int i = 0; i < iovcnt; ++i) {
+		iov = &uio->uio_iov[i];
+
+		/* Invalid argument if iovec is not page and sector aligned. */
+		if (((uintptr_t)iov->iov_base & (PAGE_SIZE - 1)) != 0 ||
+		    (iov->iov_len & (MAX(PAGE_SIZE, sector_size) - 1)) != 0) {
+			error = EINVAL;
+			break;
+		}
+
+		n = vm_fault_quick_hold_pages(&curproc->p_vmspace->vm_map,
+		    (vm_offset_t)iov->iov_base,
+		    iov->iov_len,
+		    prot,
+		    &pages[count],
+		    npages - count);
+		if (n < 0) {
+			error = EFAULT;
+			break;
+		}
+		count += n;
+	}
+
+	if (error != 0)
+		vm_page_unhold_pages(pages, count);
+
+	/*
+	 * Page count implied by sum of iov_len must match npages, computed
+	 * from uio_resid.
+	 */
+	KASSERT(error || count == npages, ("ffs_direct_hold_pages: mismatch"));
+
+	return (error);
+}
+
+static int
+ffs_direct_resolve_cache_conflicts(struct vnode *vp, off_t offset, size_t length)
+{
+	struct fs *fs;
+	struct bufobj *bo;
+	ufs_lbn_t begin;
+	ufs_lbn_t end;
+	vm_object_t object;
+	vm_pindex_t begin_index;
+	vm_pindex_t end_index;
+	vm_page_t page;
+	bool conflict;
+	int error;
+
+	/*
+	 * If we can prove that there are no pre-existing VM pages in our
+	 * range, then we can proceed without further ado.  Otherwise, we'll
+	 * either resolve the conflict or fall back to the buffered path.
+	 *
+	 * The MNTK_SHARED_DIRECT locking protocol prevents new conflicting
+	 * pages from entering virtual memory or file buffers.  We hold an
+	 * exclusive range lock, even if reading.  Buffered reads and writes
+	 * lock whole file system blocks, so they serialize against direct
+	 * reads and writes of any part of the block, even if the user space
+	 * read or write system call is for a non-overlapping region of a
+	 * block.  User-mapped page faults conflict directly without range
+	 * adjustment.
+	 */
+
+	/* No VM object? */
+	if (!(object = vp->v_object))
+		return (0);
+
+	/* Is any part of this range currently resident in virtual memory? */
+	begin_index = OFF_TO_IDX(offset);
+	end_index = OFF_TO_IDX(offset + length);
+	conflict = false;
+	VM_OBJECT_RLOCK(object);
+	page = vm_page_find_least(object, begin_index);
+	if (page)
+		conflict = page->pindex < end_index;
+	VM_OBJECT_RUNLOCK(object);
+	if (!conflict)
+		return (0);
+
+	/*
+	 * If the policy is to favor buffered I/O performance, then give up and
+	 * fall back to the buffered path.
+	 */
+	if (ffs_direct_cache_policy == 1)
+		return (EBUSY);
+
+	/* Try to deactivate conflicting VM pages. */
+	VM_OBJECT_RLOCK(object);
+	vm_object_page_noreuse(object, begin_index, end_index);
+	VM_OBJECT_RUNLOCK(object);
+
+	/* Try to deactivate conflicting clean buffers. */
+	fs = ITOFS(VTOI(vp));
+	bo = &vp->v_bufobj;
+	begin = lblkno(fs, offset);
+	end = lblkno(fs, roundup(offset + length, fs->fs_bsize));
+	BO_RLOCK(bo);
+	error = bnoreuselist(&bo->bo_clean, bo, begin, end);
+	BO_RUNLOCK(bo);
+	if (error)
+		return (error);
+
+	/* Try to remove conflicting clean VM pages. */
+	VM_OBJECT_WLOCK(object);
+	vm_object_page_remove(object, begin_index, end_index,
+	    OBJPR_CLEANONLY);
+	VM_OBJECT_WUNLOCK(object);
+
+	/* Check if we succeeded in removing the conflict. */
+	conflict = false;
+	VM_OBJECT_RLOCK(object);
+	page = vm_page_find_least(object, begin_index);
+	if (page)
+		conflict = page->pindex < end_index;
+	VM_OBJECT_RUNLOCK(object);
+	if (!conflict)
+		return (0);
+
+	/*
+	 * A future attempt might succeed for this range when dirty buffers and
+	 * pages have been cleaned, but for now, we have to fall back to the
+	 * buffered path.
+	 *
+	 * XXX: Perhaps a higher level could exist that starts writeback, and
+	 * higher level again that waits for it, if that can be done without
+	 * deadlocking.
+	 */
+	return (EBUSY);
+}
+
+static int
+ffs_direct_io(struct vnode *vp, struct uio *uio, int ioflag)
+{
+	struct vm_page **pages;
+	int npages;
+	int sector_size;
+	size_t xferred;
+	off_t phys_offset;
+	off_t phys_length;
+	int error;
+
+	/* No direct path for non-memory-aligned range. */
+        if ((uio->uio_resid & (PAGE_SIZE - 1)) != 0)
+		return (EINVAL);
+
+	/* No direct path for non-sector-aligned range. */
+	sector_size = ITODEVVP(VTOI(vp))->v_bufobj.bo_bsize;
+        if ((uio->uio_offset & (sector_size - 1)) != 0 ||
+	    (uio->uio_resid & (sector_size - 1)) != 0)
+		return (EINVAL);
+
+	/* No direct path for non-userspace buffers. */
+	if (uio->uio_segflg != UIO_USERSPACE)
+			return (ENOTSUP);
+
+	/* No direct path for various unsupported cases. */
+	if (vp->v_type != VREG ||
+	    (vp->v_vflag & VV_COPYONWRITE))
+			return (ENOTSUP);
+
+	/* No direct path past end of file (yet). */
+	if (VTOI(vp)->i_size < uio->uio_offset + uio->uio_resid)
+		return (ENOTSUP);
+
+	/* Try to evict any overlapping buffered data. */
+	error = ffs_direct_resolve_cache_conflicts(vp,
+	    uio->uio_offset,
+	    uio->uio_offset + uio->uio_resid);
+	if (error)
+		return (error);
+
+	/* Hold user space pages. */
+	npages = uio->uio_resid / PAGE_SIZE;
+	if (npages > 0) {
+		pages = malloc(sizeof(*pages) * npages, M_TEMP, M_WAITOK);
+		error = ffs_direct_hold_pages(uio, sector_size, pages, npages);
+		if (error != 0) {
+			free(pages, M_TEMP);
+			return (error);
+		}
+	}
+
+	xferred = 0;
+	while (uio->uio_resid > 0) {
+		struct bio *bp;
+
+		/* Find physically contiguous blocks on disk. */
+		error = ffs_direct_find_contiguous(vp,
+		    uio->uio_offset + xferred,
+		    uio->uio_resid,
+		    &phys_offset,
+		    &phys_length);
+		if (error != 0)
+			break;
+
+		/* Start I/O directly on the device. */
+		bp = g_alloc_bio();
+		bp->bio_cmd = uio->uio_rw == UIO_READ ? BIO_READ : BIO_WRITE;
+		bp->bio_flags |= BIO_UNMAPPED;
+		bp->bio_dev = ITODEVVP(VTOI(vp))->v_rdev;
+		bp->bio_offset = phys_offset;
+		bp->bio_length = phys_length;
+		bp->bio_data = unmapped_buf;
+		bp->bio_ma = &pages[xferred / PAGE_SIZE];
+		bp->bio_ma_n = phys_length / PAGE_SIZE;
+		bp->bio_ma_offset = 0;
+		g_io_request(bp, ITODEVVP(VTOI(vp))->v_bufobj.bo_private);
+
+		/*
+		 * We could in principle run more than one I/O at the same
+		 * time, but that would make it hard for user space to control
+		 * the I/O queue depth.  For now, wait for them sequentially,
+		 * and hope that one loop is usually enough.
+		 */
+		error = biowait(bp,
+		    uio->uio_rw == UIO_READ ? "ffs_dr" : "ffs_dw");
+		g_destroy_bio(bp);
+
+		if (error != 0)
+			break;
+
+		xferred += phys_length;
+		uio->uio_resid -= phys_length;
+	}
+
+	vm_page_unhold_pages(pages, npages);
+	if (npages > 0)
+		free(pages, M_TEMP);
+
+	/* Update atime and mtime, and write mtime for O_SYNC (not O_DSYNC). */
+	if (error == 0) {
+		if (uio->uio_rw == UIO_WRITE) {
+			UFS_INODE_SET_FLAG_SHARED(VTOI(vp), IN_UPDATE);
+			if ((ioflag & (IO_SYNC | IO_DATASYNC)) == IO_SYNC)
+				error = ffs_update(vp, 1);
+		} else if ((vp->v_mount->mnt_flag & (MNT_NOATIME | MNT_RDONLY)) == 0)
+			UFS_INODE_SET_FLAG_SHARED(VTOI(vp), IN_ACCESS);
+	}
+
+	/*
+	 * TODO: Currently IO_SYNC doesn't flush device write caches, to match
+	 * the buffered bath.  Synchronous direct writes should in future use
+	 * FUA, or BIO_FLUSH if not available, like Linux and Windows.
+	 */
+
+	return (error);
+}
+
+static int
+ffs_direct(struct vnode *vp, struct uio *uio, int ioflags)
+{
+	int error;
+
+	/*
+	 * If the bufferless direct path is turned off, fall back to buffered
+	 * I/O by failing with ENOTSUP.  (Note that the buffered path still
+	 * tries to minimize caching for O_DIRECT, but it is less efficient and
+	 * less concurrent.)
+	 */
+	if (ffs_direct_cache_policy > 0)
+		error = ffs_direct_io(vp, uio, ioflags);
+	else
+		error = ENOTSUP;
+
+	/* Tunable error fallback modes. */
+	if (error == EINVAL) {
+		/*
+		 * The arguments don't conform to alignment requirements for
+		 * direct I/O.  Report that to user space (like many other
+		 * operating systems) if vfs.ffs.direct.einval is set.
+		 * Otherwise, fall back to the buffered path.
+		 */
+		if (!ffs_direct_einval)
+			error = ENOTSUP;
+	} else if (error == EBUSY) {
+		/*
+		 * Normally, unresolvable cache conflicts fall back to the
+		 * buffered path, but if vfs.ffs.direct.ebusy is set, EBUSY is
+		 * returned to user space, for testing purposes.
+		 */
+		if (!ffs_direct_ebusy)
+			error = ENOTSUP;
+	}
+
+	/*
+	 * If ENOTSUP is returned, then the feature is disabled, an unsupported case
+	 * was reached, or the above conversions were applied, and then callers
+	 * will fall back to the buffered path.  Other errors should be
+	 * surfaced to user space.
+	 */
+
+	return (error);
+}
+
 /*
  * Vnode op for reading.
  */
@@ -666,6 +1046,14 @@ ffs_read(
 #else
 		panic("ffs_read+IO_EXT");
 #endif
+
+	if ((ioflag & IO_DIRECT) != 0) {
+		error = ffs_direct(vp, uio, ioflag);
+		if (error == 0 || error != ENOTSUP)
+			return (error);
+		printf("ffs_read IO_DIRECT falling through to buffered path\n");
+	}
+
 #ifdef DIRECTIO
 	if ((ioflag & IO_DIRECT) != 0) {
 		int workdone;
@@ -862,6 +1250,21 @@ ffs_write(
 #else
 		panic("ffs_write+IO_EXT");
 #endif
+
+	if ((ioflag & IO_DIRECT) != 0) {
+		error = ffs_direct(vp, uio, ioflag);
+		if (error == 0 || error != ENOTSUP)
+			return (error);
+		printf("ffs_write IO_DIRECT falling through to buffered path\n");
+
+		/*
+		 * The direct path wanted a shared lock (per
+		 * MNTK_SHARED_DIRECT), but the fallback buffered path expects
+		 * an exclusive lock.
+		 */
+	        if (VOP_ISLOCKED(vp) != LK_EXCLUSIVE)
+	                vn_lock(vp, LK_UPGRADE | LK_RETRY);
+	}
 
 	seqcount = ap->a_ioflag >> IO_SEQSHIFT;
 	ip = VTOI(vp);
