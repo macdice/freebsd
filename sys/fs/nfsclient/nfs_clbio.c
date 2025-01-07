@@ -437,7 +437,8 @@ ncl_bioread(struct vnode *vp, struct uio *uio, int ioflag, struct ucred *cred)
 	struct thread *td;
 	struct nfsmount *nmp = VFSTONFS(vp->v_mount);
 	daddr_t lbn, rabn;
-	int biosize, bcount, error, i, n, nra, on, save2, seqcount;
+	int biosize, bcount, error, n, nra, on, save2, seqcount;
+	//int biosize, bcount, error, i, n, nra, on, save2, seqcount;
 	off_t tmp_off;
 
 	KASSERT(uio->uio_rw == UIO_READ, ("ncl_read mode"));
@@ -619,61 +620,10 @@ ncl_bioread(struct vnode *vp, struct uio *uio, int ioflag, struct ucred *cred)
 		    if (error) {
 			    brelse(bp);
 		    }
-		    while (error == NFSERR_BAD_COOKIE) {
-			ncl_invaldir(vp);
-			error = ncl_vinvalbuf(vp, 0, td, 1);
-
-			/*
-			 * Yuck! The directory has been modified on the
-			 * server. The only way to get the block is by
-			 * reading from the beginning to get all the
-			 * offset cookies.
-			 *
-			 * Leave the last bp intact unless there is an error.
-			 * Loop back up to the while if the error is another
-			 * NFSERR_BAD_COOKIE (double yuch!).
-			 */
-			for (i = 0; i <= lbn && !error; i++) {
-			    NFSLOCKNODE(np);
-			    if (np->n_direofoffset
-				&& (i * NFS_DIRBLKSIZ) >= np->n_direofoffset) {
-				    NFSUNLOCKNODE(np);
-				    error = 0;
-				    goto out;
-			    }
-			    NFSUNLOCKNODE(np);
-			    bp = nfs_getcacheblk(vp, i, NFS_DIRBLKSIZ, td);
-			    if (!bp) {
-				error = newnfs_sigintr(nmp, td);
-				if (error == 0)
-					error = EINTR;
-				goto out;
-			    }
-			    if ((bp->b_flags & B_CACHE) == 0) {
-				    bp->b_iocmd = BIO_READ;
-				    vfs_busy_pages(bp, 0);
-				    error = ncl_doio(vp, bp, cred, td, 0);
-				    /*
-				     * no error + B_INVAL == directory EOF,
-				     * use the block.
-				     */
-				    if (error == 0 && (bp->b_flags & B_INVAL))
-					    break;
-			    }
-			    /*
-			     * An error will throw away the block and the
-			     * for loop will break out.  If no error and this
-			     * is not the block we want, we throw away the
-			     * block and go for the next one via the for loop.
-			     */
-			    if (error || i < lbn)
-				    brelse(bp);
-			}
-		    }
 		    /*
-		     * The above while is repeated if we hit another cookie
-		     * error.  If we hit an error and it wasn't a cookie error,
-		     * we give up.
+		     * The above might fail with ESRCH if we don't have a
+		     * cookie for this block.  nfs_readdir() will cope with
+		     * that.
 		     */
 		    if (error)
 			    goto out;

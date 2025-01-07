@@ -3393,7 +3393,8 @@ nfsrpc_readdir(vnode_t vp, struct uio *uiop, nfsuint64 *cookiep,
 	u_int64_t dotfileid, dotdotfileid = 0, fakefileno = UINT64_MAX;
 	char *cp;
 	nfsattrbit_t attrbits, dattrbits;
-	u_int32_t rderr, *tl2 = NULL;
+	u_int32_t rderr;
+	//, *tl2 = NULL;
 	size_t tresid;
 
 	KASSERT(uiop->uio_iovcnt == 1 &&
@@ -3704,7 +3705,7 @@ nfsrpc_readdir(vnode_t vp, struct uio *uiop, nfsuint64 *cookiep,
 					tlen -= len;
 					NFSBZERO(cp, tlen);
 					cp += tlen; /* points to cookie store */
-					tl2 = (u_int32_t *)cp;
+					//tl2 = (u_int32_t *)cp;
 					uiop->uio_iov->iov_base =
 					    (char *)uiop->uio_iov->iov_base +
 					    tlen + NFSX_HYPER;
@@ -3763,10 +3764,25 @@ nfsrpc_readdir(vnode_t vp, struct uio *uiop, nfsuint64 *cookiep,
 			    } else {
 				dp->d_fileno = nfsva.na_fileid;
 			    }
-			    *tl2++ = cookiep->nfsuquad[0] = cookie.lval[0] =
-				ncookie.lval[0];
-			    *tl2 = cookiep->nfsuquad[1] = cookie.lval[1] =
-				ncookie.lval[1];
+#if 0
+			    /*
+			     * After d_name, secretly store the cookie for
+			     * *this* entry.  This is not intended for user
+			     * space consumption, but is used by nfs_readdir()
+			     * to cross-check the block that is reads.
+			     */
+			    *tl2++ = cookiep->nfsuquad[0];
+			    *tl2 = cookiep->nfsuquad[1];
+#endif
+			    /*
+			     * d_off has the offset of the next entry.  In the
+			     * case of the final entry in a block, it will be
+			     * needed to read the next block, so we also write
+			     * it out to the caller's cookiep.
+			     */
+			    dp->d_off = ncookie.qval;
+			    cookiep->nfsuquad[0] = ncookie.lval[0];
+			    cookiep->nfsuquad[1] = ncookie.lval[1];
 			}
 			more_dirs = fxdr_unsigned(int, *tl);
 		}

@@ -115,6 +115,7 @@ ncl_uninit(struct vfsconf *vfsp)
 #endif
 }
 
+#if 0
 /* Returns with NFSLOCKNODE() held. */
 void 
 ncl_dircookie_lock(struct nfsnode *np)
@@ -133,6 +134,7 @@ ncl_dircookie_unlock(struct nfsnode *np)
 	wakeup(&np->n_flag);
 	NFSUNLOCKNODE(np);
 }
+#endif
 
 bool
 ncl_excl_start(struct vnode *vp)
@@ -271,6 +273,7 @@ ncl_getcookie(struct nfsnode *np, off_t off, int add)
 	int pos;
 	nfsuint64 *retval = NULL;
 
+printf("XXX ncl_getcookie off=%zu\n", off);
 	pos = (uoff_t)off / NFS_DIRBLKSIZ;
 	if (pos == 0 || off < 0) {
 		KASSERT(!add, ("nfs getcookie add at <= 0"));
@@ -289,6 +292,8 @@ ncl_getcookie(struct nfsnode *np, off_t off, int add)
 	}
 	while (pos >= NFSNUMCOOKIES) {
 		pos -= NFSNUMCOOKIES;
+		if (dp->ndm_eocookie < NFSNUMCOOKIES)
+			goto out;	/* holes not allowed */
 		if (LIST_NEXT(dp, ndm_list)) {
 			if (!add && dp->ndm_eocookie < NFSNUMCOOKIES &&
 			    pos >= dp->ndm_eocookie)
@@ -304,14 +309,66 @@ ncl_getcookie(struct nfsnode *np, off_t off, int add)
 			goto out;
 	}
 	if (pos >= dp->ndm_eocookie) {
-		if (add)
+		if (add && dp->ndm_eocookie == pos) {
+			/* appended, distinguishable by value zero. */
 			dp->ndm_eocookie = pos + 1;
-		else
+			dp->ndm4_cookies[pos] = 0;
+		} else {
 			goto out;
+		}
 	}
 	retval = &dp->ndm_cookies[pos];
 out:
 	return (retval);
+}
+
+/*
+ * Given a cookie received from user space, find out where in the buffer cache
+ * the corresponding block of results begins.
+ *
+ * If the result is OFF_MAX, then no offset is configured for this kthe cookie is not aligned with the contents
+ * of the buffer cache, which usually implies that that the directory changed
+ * since the cookie was given to user space (but the cookie could also just be
+ * nonsense from user space).  In that case the directory stream can still be
+ * continued from this cookie by going directly to the server, but the cache
+ * must not be used for this request.
+ *
+ * Note that even if a non-OFF_MAX value is returned, the caller should check
+ * for invalidations after copying data out of the buffer cache, to close
+ * races.  XXX TODO XXX
+ */
+off_t
+ncl_getcookie_offset(struct nfsnode *np, uint64_t cookie,
+    uint64_t *dircookiegen)
+{
+	off_t offset;
+	struct nfsdmap *dp;
+
+	/*
+	 * Zero cookie is the first block by definition, and begins a new scan
+	 * of the directory from user space.
+	 */
+	if (cookie == 0)
+		return 0;
+
+	/*
+	 * Linear search for cookie.  Cookies are sorted in order of
+	 * the corresponding cached blocks.
+	 *
+	 * XXX hash me
+	 */
+	offset = 0;
+	dp = LIST_FIRST(&np->n_cookies);
+	while (dp) {
+		for (int i = 0; i < dp->ndm_eocookie; ++i)
+			if (dp->ndm4_cookies[cookie] == cookie)
+				return (offset + i * NFS_DIRBLKSIZ);
+
+		offset += NFS_DIRBLKSIZ * dp->ndm_eocookie;
+		dp = LIST_NEXT(dp, ndm_list);
+	}
+
+	return (OFF_MAX);
 }
 
 /*
@@ -323,16 +380,21 @@ void
 ncl_invaldir(struct vnode *vp)
 {
 	struct nfsnode *np = VTONFS(vp);
+	struct nfsdmap *dp;
 
+printf("XXX ncl_invaliddir\n");
 	KASSERT(vp->v_type == VDIR, ("nfs: invaldir not dir"));
-	ncl_dircookie_lock(np);
+	NFSLOCKNODE(np);
 	np->n_direofoffset = 0;
-	NFSUNLOCKNODE(np);
 	np->n_cookieverf.nfsuquad[0] = 0;
 	np->n_cookieverf.nfsuquad[1] = 0;
-	if (LIST_FIRST(&np->n_cookies))
-		LIST_FIRST(&np->n_cookies)->ndm_eocookie = 0;
-	ncl_dircookie_unlock(np);
+	dp = LIST_FIRST(&np->n_cookies);
+	while (dp) {
+		dp->ndm_eocookie = 0;
+		dp = LIST_NEXT(dp, ndm_list);
+	}
+	np->n_dircookiegen++;
+	NFSUNLOCKNODE(np);
 }
 
 /*

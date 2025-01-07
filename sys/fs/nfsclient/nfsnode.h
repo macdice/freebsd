@@ -119,6 +119,8 @@ struct nfsnode {
 		struct sillyrename *nf_silly;	/* Ptr to silly rename struct */
 		LIST_HEAD(, nfsdmap) nd_cook;	/* cookies */
 	} n_un3;
+	uint64_t		n_dircookiegen;	/* Dir cookie generation */
+	uint64_t		n_dirbuffergen;	/* Dir buffer generation */
 	short			n_fhsize;	/* size in bytes, of fh */
 	u_int32_t		n_flag;		/* Flag for locking.. */
 	int			n_directio_opens;
@@ -186,6 +188,8 @@ int	ncl_reclaim(struct vop_reclaim_args *);
 int	ncl_removeit(struct sillyrename *, struct vnode *);
 int	ncl_nget(struct mount *, u_int8_t *, int, struct nfsnode **, int);
 nfsuint64 *ncl_getcookie(struct nfsnode *, off_t, int);
+off_t	ncl_getcookie_offset(struct nfsnode *np, uint64_t cookie,
+    uint64_t *dircookiegen);
 void	ncl_invaldir(struct vnode *);
 bool	ncl_excl_start(struct vnode *);
 void	ncl_excl_finish(struct vnode *, bool old_lock);

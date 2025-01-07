@@ -63,6 +63,7 @@
 #include <sys/stat.h>
 #include <sys/sysctl.h>
 #include <sys/signalvar.h>
+#include <sys/stdatomic.h>
 
 #include <vm/vm.h>
 #include <vm/vm_extern.h>
@@ -2413,9 +2414,14 @@ nfs_readdir(struct vop_readdir_args *ap)
 	struct vnode *vp = ap->a_vp;
 	struct nfsnode *np = VTONFS(vp);
 	struct uio *uio = ap->a_uio;
-	ssize_t tresid, left;
+	struct thread *td = curthread;
+	//ssize_t tresid, left;
+	ssize_t left;
 	int error = 0;
-	struct vattr vattr;
+	//struct vattr vattr;
+	uint64_t cookie;
+	uint64_t cookiegen;
+	off_t offset;
 
 	if (ap->a_eofflag != NULL)
 		*ap->a_eofflag = 0;
@@ -2423,9 +2429,35 @@ nfs_readdir(struct vop_readdir_args *ap)
 		return(EPERM);
 
 	/*
-	 * First, check for hit on the EOF offset cache
+	 * The offset received from user space is a cookie.  Zero means start
+	 * reading the current directory stream from the top, and any other
+	 * value must be from d_off in an earlier result, and asks for the
+	 * following chunk the same directory stream.
+	 *
+	 * Either the sequence of cookies passed in by a caller in successive
+	 * getdirentries() calls matches or extends the cached chain of
+	 * cookies, or it doesn't and must be handled by slower uncached RPC
+	 * requests to the server.  The latter case is expected whenever the
+	 * directory changes while a caller is looped through the directory.
+	 */
+	cookie = uio->uio_offset;
+
+printf("nfs_readdir 1\n");
+#if 0
+	/*
+	 * First, check for hit on the EOF offset cache.
+	 *
+	 * While we have the lock, also check if this cookie matches the first
+	 * entry on any page in the cached directory stream, or the tail page
+	 * that hasn't been loaded yet.  For zero cookie, that is always true.
+	 * Also capture the stream version, so we can detect concurrent
+	 * changes below.
+	 *
+	 * XXX end-of-stream detection is broken here
 	 */
 	NFSLOCKNODE(np);
+	offset = ncl_getcookie_offset(np, uio->uio_offset, &dirver);
+	NFSUNLOCKNODE(np);
 	if (np->n_direofoffset > 0 && uio->uio_offset >= np->n_direofoffset &&
 	    (np->n_flag & NMODIFIED) == 0) {
 		NFSUNLOCKNODE(np);
@@ -2437,13 +2469,16 @@ nfs_readdir(struct vop_readdir_args *ap)
 				NFSINCRGLOBAL(nfsstatsv1.direofcache_hits);
 				if (ap->a_eofflag != NULL)
 					*ap->a_eofflag = 1;
+printf("nfs_readdir 2\n");
 				return (0);
 			} else
 				NFSUNLOCKNODE(np);
 		}
 	} else
 		NFSUNLOCKNODE(np);
+#endif
 
+printf("nfs_readdir 3 offset = %zu\n", uio->uio_offset);
 	/*
 	 * NFS always guarantees that directory entries don't straddle
 	 * DIRBLKSIZ boundaries.  As such, we need to limit the size
@@ -2461,20 +2496,86 @@ nfs_readdir(struct vop_readdir_args *ap)
 	 * this directory read.
 	 * This removes potentially stale name cache entries.
 	 */
-	if (uio->uio_offset == 0 &&
+	if (cookie == 0 &&
 	    (VFSTONFS(vp->v_mount)->nm_flag & NFSMNT_RDIRPLUS) != 0)
 		cache_purge(vp);
 
 	/*
-	 * Call ncl_bioread() to do the real work.
+	 * Is this a cookie that we can map to a buffer block?  This is always
+	 * true for a zero cookie, and otherwise it has to be one that we
+	 * issued and mapped to a block.  Also note the cookie generation,
+	 * to detect concurrent directory changes below.
 	 */
-	tresid = uio->uio_resid;
-	error = ncl_bioread(vp, uio, 0, ap->a_cred);
+	NFSLOCKNODE(np);
+	offset = ncl_getcookie_offset(np, uio->uio_offset, &cookiegen);
+	NFSUNLOCKNODE(np);
+	if (offset == OFF_MAX)
+	{
+		/* Unknown cookie.  Bypass the cache. */
+		printf("XXX ESRCH 1\n");
+		error = ESRCH;
+	}
+	else
+	{
+		uint64_t buffergen;
+		struct uio temp_uio;
 
-	if (!error && uio->uio_resid == tresid) {
-		NFSINCRGLOBAL(nfsstatsv1.direofcache_misses);
-		if (ap->a_eofflag != NULL)
-			*ap->a_eofflag = 1;
+		/*
+		 * Zap any buffer contents OLDER than the generation of the
+		 * cookie->offset mapping we looked up.
+		 */
+		buffergen = atomic_load_64(&np->n_dirbuffergen);
+		if (buffergen < cookiegen) {
+			printf("XXX buffergen < cookiegen, zap\n");
+			error = ncl_vinvalbuf(vp, V_SAVE | V_ALLOWCLEAN, td, 1);
+			if (error)
+				return (error);
+			atomic_fetchadd_64(&np->n_dirbuffergen,
+			    cookiegen - buffergen);
+		}
+
+		/*
+		 * Read via the buffer cache.  We need a temporary uio with the
+		 * offset into the cache instead of the cookie.  If this causes
+		 * a cache miss, the reverse conversion offset->cookie will be
+		 * done inside ncl_doio(), and that might fail with ESRCH if
+		 * there is a concurrent invalidation.
+		 */
+		temp_uio = *uio;
+		temp_uio.uio_offset = offset;
+		//tresid = uio->uio_resid;
+		error = ncl_bioread(vp, &temp_uio, 0, ap->a_cred);
+
+		if (error == ESRCH)
+			printf("XXX ESRCH 2\n");
+#if 0
+		/* XXX fixme */
+		if (!error && uio->uio_resid == tresid) {
+			NFSINCRGLOBAL(nfsstatsv1.direofcache_misses);
+			if (ap->a_eofflag != NULL)
+				*ap->a_eofflag = 1;
+		}
+#endif
+
+		/*
+		 * It's possible that the read saw NEWER buffer contents, if
+		 * someone else loaded from a new generation of cookies.
+		 */
+		if (!error && cookiegen != atomic_load_64(&np->n_dircookiegen))
+		{
+			printf("XXX ESRCH 3\n");
+			error = ESRCH;
+		}
+	}
+
+	/*
+	 * ESRCH means that our cookie is out of sync with the cache, probably
+	 * because the directory changed since it was issued.  Fetch from the
+	 * server directly, and don't disturb the new generation of cached
+	 * data.
+	 */
+	if (error == ESRCH) {
+		printf("XXX ESRCH!\n");
 	}
 
 	/* Add the partial DIRBLKSIZ (left) back in. */
@@ -2496,24 +2597,24 @@ ncl_readdirrpc(struct vnode *vp, struct uio *uiop, struct ucred *cred,
 	struct nfsmount *nmp = VFSTONFS(vp->v_mount);
 	int error = 0, eof, attrflag;
 
+
 	KASSERT(uiop->uio_iovcnt == 1 &&
 	    (uiop->uio_offset & (DIRBLKSIZ - 1)) == 0 &&
 	    (uiop->uio_resid & (DIRBLKSIZ - 1)) == 0,
 	    ("nfs readdirrpc bad uio"));
+printf("nfs_readdirrpc 1 offset = %zu\n", uiop->uio_offset);
 
+	
 	/*
 	 * If there is no cookie, assume directory was stale.
 	 */
-	ncl_dircookie_lock(dnp);
-	NFSUNLOCKNODE(dnp);
+	NFSLOCKNODE(dnp);
 	cookiep = ncl_getcookie(dnp, uiop->uio_offset, 0);
-	if (cookiep) {
+	NFSUNLOCKNODE(dnp);
+	if (cookiep)
 		cookie = *cookiep;
-		ncl_dircookie_unlock(dnp);
-	} else {
-		ncl_dircookie_unlock(dnp);		
-		return (NFSERR_BAD_COOKIE);
-	}
+	else
+		return (ESRCH);
 
 	if (NFSHASNFSV3(nmp) && !NFSHASGOTFSINFO(nmp))
 		(void)ncl_fsinfo(nmp, vp, cred, td);
@@ -2530,16 +2631,57 @@ ncl_readdirrpc(struct vnode *vp, struct uio *uiop, struct ucred *cred,
 		 */
 		if (eof) {
 			NFSLOCKNODE(dnp);
-			dnp->n_direofoffset = uiop->uio_offset;
+			cookiep = ncl_getcookie(dnp, uiop->uio_offset, 0);
 			NFSUNLOCKNODE(dnp);
+
+			/*
+			 * We hit EOF, so we don't expect to have a cookie for
+			 * the folowing block already.
+			 */
+			if (cookiep) {
+				ncl_invaldir(vp);
+				error = ESRCH;
+			}
 		} else {
 			if (uiop->uio_resid > 0)
 				printf("EEK! readdirrpc resid > 0\n");
-			ncl_dircookie_lock(dnp);
-			NFSUNLOCKNODE(dnp);
+
+			/*
+			 * nfsrpc_readdir() wrote the cookie for the following
+			 * block of results into *cookiep.  Record that cookie
+			 * along with the offset of the next page.
+			 */
+			NFSLOCKNODE(dnp);
 			cookiep = ncl_getcookie(dnp, uiop->uio_offset, 1);
-			*cookiep = cookie;
-			ncl_dircookie_unlock(dnp);
+			NFSUNLOCKNODE(dnp);
+			if (cookiep == NULL) {
+				/*
+				 * It was not strictly an append of one block,
+				 * forming a chain.  Something must be out of
+				 * sync...
+				 */
+				ncl_invaldir(vp);
+				error = ESRCH;
+			} else if (cookiep->nfsuquad[0] == 0 &&
+			    cookiep->nfsuquad[1] == 0) {
+				/*
+				 * New cookie appended to chain.  Remember it,
+				 * so that we can load that block when
+				 * requested.
+				 */
+				*cookiep = cookie;
+			} else if (memcmp(cookiep, &cookie, sizeof(cookie))) {
+				/*
+				 * We already knew about a block that follows
+				 * this one, but it has a different cookie!
+				 * That means that the number of entries in
+				 * this block has changed.  That's expected to
+				 * happen sometimes, when we first detect a
+				 * directory change this way.
+				 */
+				ncl_invaldir(vp);
+				error = ESRCH;
+			}
 		}
 	} else if (NFS_ISV4(vp)) {
 		error = nfscl_maperr(td, error, (uid_t)0, (gid_t)0);
@@ -2568,16 +2710,13 @@ ncl_readdirplusrpc(struct vnode *vp, struct uio *uiop, struct ucred *cred,
 	/*
 	 * If there is no cookie, assume directory was stale.
 	 */
-	ncl_dircookie_lock(dnp);
-	NFSUNLOCKNODE(dnp);
+	NFSLOCKNODE(dnp);
 	cookiep = ncl_getcookie(dnp, uiop->uio_offset, 0);
-	if (cookiep) {
+	NFSLOCKNODE(dnp);
+	if (cookiep)
 		cookie = *cookiep;
-		ncl_dircookie_unlock(dnp);
-	} else {
-		ncl_dircookie_unlock(dnp);
-		return (NFSERR_BAD_COOKIE);
-	}
+	else
+		return (ESRCH);
 
 	if (NFSHASNFSV3(nmp) && !NFSHASGOTFSINFO(nmp))
 		(void)ncl_fsinfo(nmp, vp, cred, td);
@@ -2590,6 +2729,8 @@ ncl_readdirplusrpc(struct vnode *vp, struct uio *uiop, struct ucred *cred,
 		/*
 		 * We are now either at end of the directory or have filled the
 		 * the block.
+		 *
+		 * XXX FIXME!  next-cookie logic needs to be like the other case
 		 */
 		if (eof) {
 			NFSLOCKNODE(dnp);
@@ -2598,11 +2739,10 @@ ncl_readdirplusrpc(struct vnode *vp, struct uio *uiop, struct ucred *cred,
 		} else {
 			if (uiop->uio_resid > 0)
 				printf("EEK! readdirplusrpc resid > 0\n");
-			ncl_dircookie_lock(dnp);
-			NFSUNLOCKNODE(dnp);
+			NFSLOCKNODE(dnp);
 			cookiep = ncl_getcookie(dnp, uiop->uio_offset, 1);
 			*cookiep = cookie;
-			ncl_dircookie_unlock(dnp);
+			NFSUNLOCKNODE(dnp);
 		}
 	} else if (NFS_ISV4(vp)) {
 		error = nfscl_maperr(td, error, (uid_t)0, (gid_t)0);
