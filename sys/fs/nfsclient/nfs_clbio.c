@@ -441,10 +441,11 @@ ncl_bioread(struct vnode *vp, struct uio *uio, int ioflag, struct ucred *cred)
 	//int biosize, bcount, error, i, n, nra, on, save2, seqcount;
 	off_t tmp_off;
 
+	printf("ncl_bioread offset = %zu, resid = %zu\n", uio->uio_offset, uio->uio_resid);
 	KASSERT(uio->uio_rw == UIO_READ, ("ncl_read mode"));
 	if (uio->uio_resid == 0)
 		return (0);
-	if (uio->uio_offset < 0)	/* XXX VDIR cookies can be negative */
+	if (uio->uio_offset < 0)
 		return (EINVAL);
 	td = uio->uio_td;
 
@@ -595,6 +596,7 @@ ncl_bioread(struct vnode *vp, struct uio *uio, int ioflag, struct ucred *cred)
 		on = 0;
 		break;
 	    case VDIR:
+		printf("XXX ncl_bioread\n");
 		NFSINCRGLOBAL(nfsstatsv1.biocache_readdirs);
 		NFSLOCKNODE(np);
 		if (np->n_direofoffset
@@ -623,7 +625,7 @@ ncl_bioread(struct vnode *vp, struct uio *uio, int ioflag, struct ucred *cred)
 		    /*
 		     * The above might fail with ESRCH if we don't have a
 		     * cookie for this block.  nfs_readdir() will cope with
-		     * that.
+		     * that. XXX what about read ahead?
 		     */
 		    if (error)
 			    goto out;
@@ -1495,6 +1497,9 @@ again:
 /*
  * Do an I/O operation to/from a cache block. This may be called
  * synchronously or from an nfsiod.
+ *
+ * For VDIR, uio_offset is an offset into the cache.  It will be converted to a
+ * cookie to pass to the server, or fail ESRCH is that is not possible.
  */
 int
 ncl_doio(struct vnode *vp, struct buf *bp, struct ucred *cr, struct thread *td,
@@ -1507,6 +1512,7 @@ ncl_doio(struct vnode *vp, struct buf *bp, struct ucred *cr, struct thread *td,
 	struct uio uio;
 	struct iovec io;
 	struct proc *p = td ? td->td_proc : NULL;
+	nfsuint64 *cookiep;
 	uint8_t	iocmd;
 
 	np = VTONFS(vp);
@@ -1574,8 +1580,21 @@ ncl_doio(struct vnode *vp, struct buf *bp, struct ucred *cr, struct thread *td,
 		error = ncl_readlinkrpc(vp, uiop, cr);
 		break;
 	    case VDIR:
+printf("XXX ncl_doio VDIR\n");
 		NFSINCRGLOBAL(nfsstatsv1.readdir_bios);
-		uiop->uio_offset = ((u_quad_t)bp->b_lblkno) * NFS_DIRBLKSIZ;
+		//uiop->uio_offset = ((u_quad_t)bp->b_lblkno) * NFS_DIRBLKSIZ;
+		/*
+		 * Convert cache offset back into a cookie, if we can.
+		 */
+		NFSLOCKNODE(np);
+		cookiep = ncl_getcookie(np,
+		    (u_quad_t)bp->b_lblkno * NFS_DIRBLKSIZ, 0);
+		NFSUNLOCKNODE(np);
+		printf("XXX ncl_doio cache offset = %zu, cookie = %zu\n",  (u_quad_t)bp->b_lblkno * NFS_DIRBLKSIZ, uiop->uio_offset);
+		/* This might fail if the cache has been invalidated. */
+		if (!cookiep)
+			return (ESRCH);
+		uiop->uio_offset = cookiep->nfsuquad[0] << 32 || cookiep->nfsuqaud[1];
 		if ((nmp->nm_flag & NFSMNT_RDIRPLUS) != 0) {
 			error = ncl_readdirplusrpc(vp, uiop, cr, td);
 			if (error == NFSERR_NOTSUPP)

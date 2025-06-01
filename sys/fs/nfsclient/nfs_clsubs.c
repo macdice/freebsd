@@ -326,23 +326,17 @@ out:
  * Given a cookie received from user space, find out where in the buffer cache
  * the corresponding block of results begins.
  *
- * If the result is OFF_MAX, then no offset is configured for this kthe cookie is not aligned with the contents
- * of the buffer cache, which usually implies that that the directory changed
- * since the cookie was given to user space (but the cookie could also just be
- * nonsense from user space).  In that case the directory stream can still be
- * continued from this cookie by going directly to the server, but the cache
- * must not be used for this request.
- *
- * Note that even if a non-OFF_MAX value is returned, the caller should check
- * for invalidations after copying data out of the buffer cache, to close
- * races.  XXX TODO XXX
+ * If the result is OFF_MAX, then the cookie is not known in the current
+ * generation.  The current generation number is also written to *cookiegen,
+ * so that the caller can check for outstanding buffer invalidations.
  */
 off_t
-ncl_getcookie_offset(struct nfsnode *np, uint64_t cookie,
-    uint64_t *dircookiegen)
+ncl_getcookie_offset(struct nfsnode *np, uint64_t cookie, uint64_t *cookiegen)
 {
 	off_t offset;
 	struct nfsdmap *dp;
+
+	*cookiegen = np->n_dircookiegen;
 
 	/*
 	 * Zero cookie is the first block by definition, and begins a new scan

@@ -3364,14 +3364,8 @@ nfscl_invalidfname(bool is_v4, char *name, int len)
  * 3 - return them to userland in the "struct dirent", so future versions
  *     of libc can use them and do whatever is necessary to make things work
  *     above these rpc calls, in the meantime
- * For now, I do #3 by "hiding" the directory offset cookies after the
- * d_name field in struct dirent. This is space inside d_reclen that
- * will be ignored by anything that doesn't know about them.
- * The directory offset cookies are filled in as the last 8 bytes of
- * each directory entry, after d_name. Someday, the userland libc
- * functions may be able to use these. In the meantime, it satisfies
- * OpenBSD's requirements for cookies being returned.
- * If expects the directory offset cookie for the read to be in uio_offset
+ * We use approach #1.
+ * It expects the directory offset cookie for the read to be in uio_offset
  * and returns the one for the next entry after this directory block in
  * there, as well.
  */

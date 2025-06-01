@@ -2501,10 +2501,8 @@ printf("nfs_readdir 3 offset = %zu\n", uio->uio_offset);
 		cache_purge(vp);
 
 	/*
-	 * Is this a cookie that we can map to a buffer block?  This is always
-	 * true for a zero cookie, and otherwise it has to be one that we
-	 * issued and mapped to a block.  Also note the cookie generation,
-	 * to detect concurrent directory changes below.
+	 * Do we recognize this cookie?  Also note the generation, so we can
+	 * detect concurrent changes below.
 	 */
 	NFSLOCKNODE(np);
 	offset = ncl_getcookie_offset(np, uio->uio_offset, &cookiegen);
@@ -2536,8 +2534,8 @@ printf("nfs_readdir 3 offset = %zu\n", uio->uio_offset);
 
 		/*
 		 * Read via the buffer cache.  We need a temporary uio with the
-		 * offset into the cache instead of the cookie.  If this causes
-		 * a cache miss, the reverse conversion offset->cookie will be
+		 * offset into the cache instead of the cookie.  If this is a
+		 * cache miss, the reverse conversion offset->cookie will be
 		 * done inside ncl_doio(), and that might fail with ESRCH if
 		 * there is a concurrent invalidation.
 		 */
@@ -2558,8 +2556,9 @@ printf("nfs_readdir 3 offset = %zu\n", uio->uio_offset);
 #endif
 
 		/*
-		 * It's possible that the read saw NEWER buffer contents, if
-		 * someone else loaded from a new generation of cookies.
+		 * It's possible that we read NEWER buffer contents, if someone
+		 * else loaded from a new generation of cookies since our
+		 * cookie->offset lookup.
 		 */
 		if (!error && cookiegen != atomic_load_64(&np->n_dircookiegen))
 		{
