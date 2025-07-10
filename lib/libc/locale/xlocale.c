@@ -366,6 +366,36 @@ querylocale(int mask, locale_t loc)
 }
 
 /*
+ * Returns the name of the locale for a particular component of a locale_t
+ * like querylocale, but with a category instead of a mask.
+ */
+const char *
+getlocalename_l(int category, locale_t loc)
+{
+	FIX_LOCALE(loc);
+	if (category == LC_ALL) {
+		/*
+		 * XXX Where will we find space to write out all the components
+		 * in setlocale() style with the right lifetime?  We can't
+		 * allocate a thread-local buffer because we can't report
+		 * failure, and we also can't use setlocale's buffer because
+		 * that wouldn't be MT-safe.
+		 *
+		 * The most obvious option would be to give struct _locale a
+		 * buffer big enough to describe itself.
+		 *
+		 * https://pubs.opengroup.org/onlinepubs/9799919799/functions/getlocalename_l.html
+		 */
+		return (NULL);	/* TODO */
+	}
+	if (category >= XLC_LAST || category < 0)
+		return (NULL);
+	if (loc->components[type])
+		return (loc->components[category]->locale);
+	return ("C");
+}
+
+/*
  * Installs the specified locale_t as this thread's locale.
  */
 locale_t

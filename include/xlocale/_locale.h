@@ -54,4 +54,8 @@ locale_t	 newlocale(int mask, const char *locale, locale_t base);
 const char	*querylocale(int mask, locale_t loc);
 locale_t	 uselocale(locale_t loc);
 
+#if __POSIX_VISIBLE >= 202405
+const char	*getlocalename_l(int category, locale_t loc);
+#endif
+
 #endif /* _XLOCALE_LOCALE_H */
