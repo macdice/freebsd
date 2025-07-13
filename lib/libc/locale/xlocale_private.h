@@ -133,7 +133,7 @@ struct _xlocale {
 	/** Buffer used by nl_langinfo_l() */
 	char *csym;
 	/** Buffer used by getlocalename_l() */
-	char localename_buffer[(ENCODING_LEN + 1) * XLC_LAST];
+	char buffer[];
 };
 
 /**
