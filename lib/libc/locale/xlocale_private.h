@@ -132,6 +132,8 @@ struct _xlocale {
 	struct lconv lconv;
 	/** Buffer used by nl_langinfo_l() */
 	char *csym;
+	/** Buffer used by getlocalename_l() */
+	char localename_buffer[(ENCODING_LEN + 1) * XLC_LAST];
 };
 
 /**

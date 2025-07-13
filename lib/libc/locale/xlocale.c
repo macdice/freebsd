@@ -184,6 +184,9 @@ destruct_locale(void *l)
 	if (loc->csym) {
 		free(loc->csym);
 	}
+	if (loc->localename_buffer) {
+		free(log->localename_buffer);
+	}
 	free(l);
 }
 
@@ -253,6 +256,7 @@ newlocale(int mask, const char *locale, locale_t base)
 	const char *realLocale = locale;
 	int useenv = 0;
 	int success = 1;
+	int localename_size = XLC_LAST * 2;
 
 	locale_t new = alloc_locale();
 	if (NULL == new) {
@@ -292,6 +296,17 @@ newlocale(int mask, const char *locale, locale_t base)
 			}
 		}
 		mask >>= 1;
+
+		if (new->component[type])
+			localename_size +=
+		    	    new->strnlen(new->component[type]->locale,
+					 ENCODING_LEN);
+	}
+	if (success && type != LC_MASK_ALL) {
+		/* Not all same, so reserve space for getlocalename_l(). */
+		new->localename_buffer = malloc(localename_size);
+		if (!new->localename_buffer)
+			success = 0;
 	}
 	if (0 == success) {
 		xlocale_release(new);
@@ -367,31 +382,42 @@ querylocale(int mask, locale_t loc)
 
 /*
  * Returns the name of the locale for a particular component of a locale_t
- * like querylocale, but with a category instead of a mask.
+ * like querylocale, but with a category or LC_ALL instead of a mask.
  */
 const char *
 getlocalename_l(int category, locale_t loc)
 {
+	int type;
+	char *p;
+
 	FIX_LOCALE(loc);
+
 	if (category == LC_ALL) {
-		/*
-		 * XXX Where will we find space to write out all the components
-		 * in setlocale() style with the right lifetime?  We can't
-		 * allocate a thread-local buffer because we can't report
-		 * failure, and we also can't use setlocale's buffer because
-		 * that wouldn't be MT-safe.
-		 *
-		 * The most obvious option would be to give struct _locale a
-		 * buffer big enough to describe itself.
-		 *
-		 * https://pubs.opengroup.org/onlinepubs/9799919799/functions/getlocalename_l.html
-		 */
-		return (NULL);	/* TODO */
+		if ((p = loc->localname_buffer)) {
+			/* Build a list that setlocale() understands. */
+			for (int i = 0; i < XLC_LAST; ++i) {
+				if (loc->components[i]) {
+					p = stpcpy(p,
+					    loc->components[i]->locale);
+				} else {
+					*p++ = 'C';
+				}
+				if (i < XLC_LAST - 1)
+					*p++ = '/';
+			}
+			return (loc->localename_buffer);
+		}
+		/* No buffer because they're all the same.  Pick one. */
+		type = 0;
+	} else {
+		/* Convert LC_XXX to XLC_XXX. */
+		type = category - 1;
+		if (type >= XLC_LAST || type < 0)
+			return (NULL);
 	}
-	if (category >= XLC_LAST || category < 0)
-		return (NULL);
+
 	if (loc->components[type])
-		return (loc->components[category]->locale);
+		return (loc->components[type]->locale);
 	return ("C");
 }
 
